@@ -7,10 +7,15 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      '/api': {
+      // Matches the /mvps/label-verify/api/* path the app actually
+      // requests (see App.jsx's API_BASE, built from BASE_URL), then
+      // strips the prefix before forwarding, since the backend itself
+      // only knows about /api/*, not the /mvps/label-verify/ prefix.
+      '/mvps/label-verify/api': {
         target: 'http://127.0.0.1:3002',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        rewrite: (path) => path.replace(/^\/mvps\/label-verify/, '')
       }
     }
   }

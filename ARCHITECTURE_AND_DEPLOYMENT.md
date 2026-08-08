@@ -141,8 +141,17 @@ button. Two jobs:
    confirms it landed, then verifies `/api/health` responds through
    the public domain with the response body printed either way.
 
-See `backend/README.md` and the workflow file itself for the full
-list of required repository secrets.
+See `.github/workflows/deploy-to-vps.yml`'s own header comment for
+the full list of required repository secrets and what each holds.
+`dev_scripts\deploy_setup.bat` automates setting them: generates a
+dedicated SSH keypair into `secrets\` if one doesn't exist, prints
+the public key to add to the VPS's `authorized_keys`, then sets each
+GitHub secret via the `gh` CLI. The four non-secret config values
+(`VPS_HOST`, `VPS_USER`, `VPS_PROJECT_PATH`, `PUBLIC_HEALTH_URL`)
+default to this project's real values, shown at each prompt, just
+press Enter to accept. `VPS_SSH_KEY` is set automatically from the
+generated key file; `OPENAI_API_KEY` prompts blank and is skipped
+until it's actually needed.
 
 ## 2.2 Testing the pipeline locally before it touches production
 
@@ -197,20 +206,34 @@ rsync -a --delete "$PROJECT/frontend/dist/" /home/leelinko/public_html/mvps/labe
 
 **Verify:**
 ```
-curl -sf https://leelinkoff.com/api/label-verify-health
+curl -sf https://leelinkoff.com/mvps/label-verify/api/health
 ```
-(or whatever the real Apache-routed health path ends up being, see
-`PUBLIC_HEALTH_URL` in repo secrets)
 
 ## 2.4 Apache reverse proxy
 
-Same `mod_proxy` pattern as insight-engine-rag, a second location
-block added alongside the existing `/mvps/rag/` one:
+**Not** a bare `/api/` proxy at the domain root, unlike an earlier
+draft of this doc assumed. insight-engine-rag's frontend is served
+at `/mvps/rag/`, but its backend proxy rule reportedly sits at the
+domain root (`/api/`). If this app's backend also proxied at the
+domain root, the two would fight over the same path, whichever
+Apache rule matches first wins, and the other app's API becomes
+unreachable. This app's proxy rule is nested under its own subpath
+instead, so it can't collide with anything else on the same VPS:
 
 ```apache
-ProxyPass /api/ http://127.0.0.1:3002/api/
-ProxyPassReverse /api/ http://127.0.0.1:3002/api/
+ProxyPass /mvps/label-verify/api/ http://127.0.0.1:3002/api/
+ProxyPassReverse /mvps/label-verify/api/ http://127.0.0.1:3002/api/
 ```
+
+The frontend calls this same prefixed path, built from
+`import.meta.env.BASE_URL` in `App.jsx` rather than hardcoded as
+`/api/...`, so it resolves correctly in both dev (Vite's dev server
+proxy, configured in `vite.config.js` with a matching rewrite that
+strips the prefix before forwarding to the backend) and production
+(this Apache rule). `PUBLIC_HEALTH_URL` in repo secrets should be set
+to `https://leelinkoff.com/mvps/label-verify/api/health`, not a bare
+`/api/health` path, and not the placeholder `/api/label-verify-health`
+path an earlier draft of this doc used, that path was never real.
 
 Internal port 3002 is never exposed publicly. All public traffic
 reaches the backend only through Apache's reverse proxy.

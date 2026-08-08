@@ -21,8 +21,8 @@ name: Deploy to VPS
 #        - required secrets are actually present (fails fast, before
 #          SSH is even attempted, with a clear message instead of a
 #          confusing failure four steps later)
+#        - backend: node --check (syntax) + Docker build
 #        - frontend: npm run build (the real compile step)
-#        - backend: npx tsc --noEmit (strict type check) + Docker build
 #      If any of this fails, the workflow stops here. Nothing touches
 #      the VPS.
 #
@@ -65,16 +65,17 @@ name: Deploy to VPS
 # last-line check right before production actually changes.
 #
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
-#   VPS_HOST            e.g. 162.214.120.12 (same VPS as insight-engine-rag)
+#   VPS_HOST            e.g. leelinkoff.com or its IP
 #   VPS_USER            e.g. root
 #   VPS_SSH_KEY          private key with SSH access to the VPS
 #   VPS_PROJECT_PATH     e.g. /opt/label-verify — MUST be a different
 #                        path than insight-engine-rag's VPS_PROJECT_PATH,
 #                        or the two deploys will overwrite each other
-#   PUBLIC_HEALTH_URL    e.g. https://leelinkoff.com/api/label-verify-health
-#                        (or however the Apache config routes this app's
-#                        health check; must not collide with the RAG
-#                        app's /api/health on the same origin)
+#   PUBLIC_HEALTH_URL    https://leelinkoff.com/mvps/label-verify/api/health
+#                        (must be nested under this app's own subpath,
+#                        not a bare /api/health, or it collides with
+#                        insight-engine-rag's proxy rule on the same
+#                        domain; see ARCHITECTURE_AND_DEPLOYMENT.md 2.4)
 #   OPENAI_API_KEY       only needed once services/extraction.ts calls
 #                        a real vision/OCR provider; the pipeline writes
 #                        it to the VPS on every deploy regardless, so
@@ -100,6 +101,24 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Backend — install deps
+        working-directory: backend
+        # Full install, not --omit=dev: typescript and @types/* are
+        # devDependencies, needed here to type-check.
+        run: npm install
+
+      - name: Backend — type check (strict TypeScript)
+        working-directory: backend
+        run: npx tsc --noEmit
+
+      # GitHub-hosted runners include Docker by default, so the actual
+      # Docker build (same command build_back.bat runs locally, same
+      # Dockerfile the VPS deploy step uses) is verified here, on
+      # disposable infrastructure, before deploy touches the real VPS.
+      - name: Backend — Docker build
+        working-directory: backend
+        run: docker build -t ttb-label-verify-backend-verify .
+
       - name: Frontend — install deps
         working-directory: frontend
         run: npm install
@@ -117,22 +136,6 @@ jobs:
             exit 1
           fi
           echo "Frontend build output confirmed at dist/index.html"
-
-      - name: Backend — install deps
-        working-directory: backend
-        run: npm install
-
-      - name: Backend — type check (strict TypeScript)
-        working-directory: backend
-        run: npx tsc --noEmit
-
-      # GitHub-hosted runners include Docker by default, so the actual
-      # Docker build (same command build_back.bat runs locally, same
-      # Dockerfile the VPS deploy step uses) is verified here, on
-      # disposable infrastructure, before deploy touches the real VPS.
-      - name: Backend — Docker build
-        working-directory: backend
-        run: docker build -t ttb-label-verify-backend-verify .
 
   deploy:
     name: Deploy backend + frontend to VPS

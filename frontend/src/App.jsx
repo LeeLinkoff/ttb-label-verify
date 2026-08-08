@@ -4,13 +4,24 @@ import './App.css'
 // Skeleton app shell. Confirms the frontend can reach the backend
 // (via /api/health) and links out to the Swagger docs. The actual
 // label upload / matching UI is not built yet.
+//
+// API paths are built from import.meta.env.BASE_URL (Vite's built-in
+// reflection of the `base` config in vite.config.js) rather than
+// hardcoded as root-relative ("/api/health"). This app is deployed
+// under /mvps/label-verify/, not the domain root, alongside
+// insight-engine-rag at /mvps/rag/ on the same VPS. A hardcoded
+// "/api/health" would resolve to the domain root and collide with
+// whichever app owns /api/ there. BASE_URL resolves correctly in
+// both dev (http://localhost:5174/mvps/label-verify/) and production.
+
+const API_BASE = `${import.meta.env.BASE_URL}api`
 
 function App() {
   const [health, setHealth] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    fetch('/api/health')
+    fetch(`${API_BASE}/health`)
       .then((res) => {
         if (!res.ok) throw new Error(`Health check failed: ${res.status}`)
         return res.json()
@@ -53,7 +64,7 @@ function App() {
           Full endpoint reference, including planned (not-yet-built) endpoints,
           is documented in Swagger.
         </p>
-        <a href="/api/docs" target="_blank" rel="noreferrer">
+        <a href={`${API_BASE}/docs`} target="_blank" rel="noreferrer">
           <button className="btn-primary">Open API Docs</button>
         </a>
       </div>
