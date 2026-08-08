@@ -264,6 +264,17 @@ deploy-to-vps.yml    Runs on every push to main (or manually).
                      production.
 ```
 
+> **⚠ One manual step required before this works, and it's not
+> automated by design.** `deploy-to-vps.yml` deploys the app, but it
+> does not configure Apache. Until Apache has a `ProxyPass` rule
+> pointing `/mvps/label-verify/api/` at the backend container, the
+> pipeline's final health-check step will fail with a 404, exactly
+> the failure this project hit on its first real deploy. This is a
+> one-time setup step, not something that needs repeating on future
+> deploys. See `ARCHITECTURE_AND_DEPLOYMENT.md` section 2.4 for the
+> real config file path, the exact block to add, and why the service
+> is named `httpd` rather than `apache2` on this specific VPS.
+
 Both can be run locally before pushing, via `act`
 (https://github.com/nektos/act), using the scripts in
 `dev_scripts/`:

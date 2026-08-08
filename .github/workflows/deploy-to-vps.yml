@@ -27,6 +27,15 @@ name: Deploy to VPS
 #      the VPS.
 #
 #   2. deploy — only runs if verify-build succeeded:
+#        - confirm Apache actually has the ProxyPass rule this app
+#          needs, checked immediately after SSH is confirmed, before
+#          any real work starts (check-only, never auto-edited, since
+#          that config file is shared with every other app on the
+#          VPS, an automated edit there carries a different blast
+#          radius than everything else this pipeline touches, which
+#          is scoped to this project alone), fails fast with the
+#          exact fix if missing, before wasting a container restart
+#          or a frontend build on a deploy that can't succeed anyway
 #        - create the VPS project directories if they don't exist yet
 #          (first deploy to a fresh VPS, or a renamed VPS_PROJECT_PATH,
 #          shouldn't require manually mkdir-ing anything by hand first)
@@ -186,6 +195,48 @@ jobs:
         # real step that needs SSH.
         run: |
           ssh -o ConnectTimeout=10 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'echo "SSH connection OK, connected as $(whoami) on $(hostname)"'
+
+      # Checked here, immediately after SSH is confirmed and before any
+      # real work starts, deliberately. Apache's config state has
+      # nothing to do with this deploy's own artifacts, so there's no
+      # reason to wait: rebuilding and restarting the live backend
+      # container, and building the frontend, are the expensive and
+      # disruptive parts of this job. Failing here instead of near the
+      # end means a missing Apache rule doesn't cost an unnecessary
+      # backend container restart or a wasted frontend build first.
+      #
+      # Deliberately check-only, never auto-edit. This project's Apache
+      # config file (post_virtualhost_global.conf) is SHARED with every
+      # other app on the VPS, including insight-engine-rag's own working
+      # /api/ rule. An automated edit to shared infrastructure carries a
+      # different blast radius than everything else this pipeline
+      # touches, which is all scoped to this project's own directory and
+      # container: a bug here could take down Apache for every site on
+      # the VPS, not just this one, from a routine push to this repo.
+      # So: fail fast with an exact fix, don't attempt the fix itself.
+      - name: Confirm Apache has the ProxyPass rule for this app
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if ! grep -q "mvps/label-verify/api" /etc/apache2/conf.d/includes/post_virtualhost_global.conf 2>/dev/null; then
+              echo "ERROR: Apache has no ProxyPass rule for /mvps/label-verify/api/ yet."
+              echo "This is a one-time manual step, not something this pipeline does for you."
+              echo ""
+              echo "Add this to /etc/apache2/conf.d/includes/post_virtualhost_global.conf:"
+              echo ""
+              echo "  <IfModule mod_proxy.c>"
+              echo "      ProxyPreserveHost On"
+              echo "      ProxyPass \"/mvps/label-verify/api/\" \"http://127.0.0.1:3002/\""
+              echo "      ProxyPassReverse \"/mvps/label-verify/api/\" \"http://127.0.0.1:3002/\""
+              echo "  </IfModule>"
+              echo ""
+              echo "Then: apachectl configtest && systemctl restart httpd"
+              echo ""
+              echo "See ARCHITECTURE_AND_DEPLOYMENT.md section 2.4 for the full explanation."
+              exit 1
+            fi
+            echo "Apache ProxyPass rule for this app confirmed present."
+          '
 
       - name: Create VPS project directories if they don't exist
         # First deploy to a fresh VPS, or a renamed VPS_PROJECT_PATH,

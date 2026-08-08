@@ -22,9 +22,9 @@ Browser
     v
 Apache (HTTPS) -- leelinkoff.com
     |
-    |-- /api/*                  --->  Docker container (127.0.0.1:3002, internal only)
+    |-- /mvps/label-verify/api/*   --->  Docker container (127.0.0.1:3002, internal only)
     |
-    |-- /mvps/label-verify/*    --->  /home/leelinko/public_html/mvps/label-verify (static files)
+    |-- /mvps/label-verify/*       --->  /home/leelinko/public_html/mvps/label-verify (static files)
 ```
 
 Same shape as insight-engine-rag, deliberately: Apache terminates
@@ -32,6 +32,41 @@ HTTPS and reverse-proxies API traffic to a backend container that
 never exposes a public port directly, static frontend files are
 served straight off disk. Two apps, two subpaths, two internal
 ports (3001 for RAG, 3002 for this one), one VPS, one Apache config.
+
+### Where things actually live on the VPS
+
+Three different locations matter, and they are not the same thing:
+
+| Location | What it is | Is it served publicly? |
+|---|---|---|
+| `/opt/label-verify` (`VPS_PROJECT_PATH`) | Where `deploy-to-vps.yml` rsyncs the source code to, and where both the backend's Docker build and the frontend's throwaway-container build happen. Contains `backend/` and `frontend/` source, plus `frontend/dist/` after a build. | **No.** This is a build/staging location only. Nothing under this path is reachable from a browser. |
+| `backend/Dockerfile` (a real, plain text file, at `/opt/label-verify/backend/Dockerfile` on the VPS) | The build recipe: base image, what to copy in, `npm install`, `npx tsc`, what command to run. This is the only thing in this whole chain that's an actual file you can open and read. Never modified or consumed during deploy, `docker build` just re-reads it each time. | N/A, it's source, not a runtime artifact. |
+| Docker **image** `ttb-label-verify-backend`, built by `docker build` reading the Dockerfile above | A static, inert template, compiled TypeScript + `node_modules`, stored inside Docker's own internal storage on the VPS, not a file you'd browse to directly. Built but not running. | No, images don't run. |
+| Docker **container** `ttb-label-verify-backend` | A live, running instance created *from* that image. This is the actual running process, the thing listening on `127.0.0.1:3002`. Same name string as the image above by convention here, but a genuinely different Docker object, list images with `docker images`, list containers with `docker ps -a`. | **No**, not directly. Only reachable through Apache's reverse proxy. |
+| `/home/leelinko/public_html/mvps/label-verify` | Where the frontend's *built* output (`/opt/label-verify/frontend/dist/*`) gets copied to after each build. This is Apache's actual document root for this app's static files. | **Yes.** This is what a browser actually receives when it requests `/mvps/label-verify/*`. |
+
+The backend's chain, spelled out:
+
+```
+backend/Dockerfile (real file, synced to /opt/label-verify/backend/)
+    |  read by `docker build`
+    v
+Docker image "ttb-label-verify-backend" (not a file, Docker's internal storage)
+    |  instantiated by `docker run`
+    v
+Docker container "ttb-label-verify-backend" (the actual running process, listens on 127.0.0.1:3002)
+```
+
+So the flow for the frontend specifically is: source lives in
+`/opt/label-verify/frontend`, gets built into
+`/opt/label-verify/frontend/dist`, then that build output gets
+copied (via `rsync`) into `/home/leelinko/public_html/mvps/label-verify`,
+which is the only one of these three locations Apache actually serves
+from. The backend's "output" is different in kind, not files copied
+somewhere, but an image built once and a container created from it.
+Rebuilding on a later deploy replaces the image, then the old
+container is removed and a new one created from the new image, the
+container itself is never "updated" in place.
 
 ## 1.2 Backend architecture
 
@@ -213,17 +248,72 @@ curl -sf https://leelinkoff.com/mvps/label-verify/api/health
 
 **Not** a bare `/api/` proxy at the domain root, unlike an earlier
 draft of this doc assumed. insight-engine-rag's frontend is served
-at `/mvps/rag/`, but its backend proxy rule reportedly sits at the
-domain root (`/api/`). If this app's backend also proxied at the
-domain root, the two would fight over the same path, whichever
-Apache rule matches first wins, and the other app's API becomes
-unreachable. This app's proxy rule is nested under its own subpath
-instead, so it can't collide with anything else on the same VPS:
+at `/mvps/rag/`, but its backend proxy rule genuinely does sit at the
+domain root (`/api/`), confirmed directly against that project's own
+deployment doc. If this app's backend also proxied at the domain
+root, the two would fight over the same path, whichever Apache rule
+matches first wins, and the other app's API becomes unreachable.
+This app's proxy rule is nested under its own subpath instead, so it
+can't collide with anything else on the same VPS.
+
+### This is a manual, one-time step, not automated
+
+`deploy-to-vps.yml` deploys the app (syncs source, rebuilds the
+Docker container, publishes the frontend) but does **not** touch
+Apache's configuration. Until this block is added by hand, the
+pipeline's final health-check step will fail with a 404, Apache has
+no rule routing `/mvps/label-verify/api/` anywhere, so it falls
+through to a plain "not found" response. This only needs doing once;
+after that, every future deploy just works.
+
+### Config file location
+
+Same file insight-engine-rag's own `/api/` rule lives in, confirmed
+against this specific server:
+
+```
+/etc/apache2/conf.d/includes/post_virtualhost_global.conf
+```
+
+This is a cPanel EasyApache (EA4) install. The config tree lives
+under `/etc/apache2/`, but the actual service and binary are named
+`httpd` (`/usr/sbin/httpd`, `systemctl status httpd`), not `apache2`,
+that's a cPanel packaging convention. Using `systemctl restart apache2`
+here will fail or silently do nothing; it has to be `httpd`.
+
+### Config to add
+
+Append this block to the same file, alongside insight-engine-rag's
+existing `/api/` block, not a separate file:
 
 ```apache
-ProxyPass /mvps/label-verify/api/ http://127.0.0.1:3002/api/
-ProxyPassReverse /mvps/label-verify/api/ http://127.0.0.1:3002/api/
+<IfModule mod_proxy.c>
+    ProxyPreserveHost On
+    ProxyPass "/mvps/label-verify/api/" "http://127.0.0.1:3002/"
+    ProxyPassReverse "/mvps/label-verify/api/" "http://127.0.0.1:3002/"
+</IfModule>
 ```
+
+### Apply it
+
+```
+apachectl configtest
+systemctl restart httpd
+```
+
+Always run `configtest` first, a syntax error here would take down
+Apache for every site on the VPS, including insight-engine-rag, not
+just this app.
+
+### Verify
+
+```
+curl -sf https://leelinkoff.com/mvps/label-verify/api/health
+```
+
+Once this returns a healthy JSON response, re-run (or just wait for
+the next push to trigger) `deploy-to-vps.yml`, its own health-check
+step will now pass.
 
 The frontend calls this same prefixed path, built from
 `import.meta.env.BASE_URL` in `App.jsx` rather than hardcoded as

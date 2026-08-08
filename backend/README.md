@@ -50,6 +50,35 @@ Dockerfile                node:20-alpine, port 3002. Full `npm install`
                           compiled `dist/server.js`.
 ```
 
+## Dockerfile, image, container: what's actually a file
+
+`Dockerfile` (this file, right here in this folder) is the only real,
+plain text file in this whole chain, everything downstream of it is a
+Docker-internal object, not something you'd browse to on disk:
+
+```
+Dockerfile (real file)
+    |  read by `docker build`
+    v
+Docker image "ttb-label-verify-backend" (Docker's internal storage, not a file)
+    |  instantiated by `docker run`
+    v
+Docker container "ttb-label-verify-backend" (the actual running process)
+```
+
+The image is a static, inert template, built once per `docker build`.
+The container is a live instance created *from* that image, and it's
+the container, not the image, that's actually running and listening
+on port 3002. They happen to share the same name string here by
+convention (`-t ttb-label-verify-backend` on build, `--name ttb-label-verify-backend`
+on run), but they're genuinely different Docker objects, list images
+with `docker images`, list running containers with `docker ps`.
+
+On the VPS, this Dockerfile lives at
+`/opt/label-verify/backend/Dockerfile` after `deploy-to-vps.yml`
+syncs it there, unchanged and unconsumed, `docker build` just
+re-reads it fresh on every deploy.
+
 ## Why services are split out
 
 Each service function takes plain data in and returns plain data out,

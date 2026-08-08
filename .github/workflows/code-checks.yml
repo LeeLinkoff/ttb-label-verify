@@ -12,24 +12,28 @@ name: Code Checks (type-check + boot test)
 # disposable runner, never on your VPS.
 # ============================================================
 #
-# Three jobs. The first two, in increasing order of what they
-# actually require, cover the backend:
+# Three jobs. frontend-build is independent and listed first; the
+# other two, in increasing order of what they actually require,
+# cover the backend:
 #   1. frontend-build — installs deps, runs the real production
 #      build (npm run build), and confirms dist/index.html actually
 #      got created. Independent of the other two jobs, runs in
 #      parallel, not sequentially after them.
 #   2. type-check — the full backend type-checks cleanly under
-#      strict: true (npx tsc --noEmit). No dependencies beyond npm
-#      install, no secrets, always runs.
+#      strict: true (npx tsc --noEmit). Stronger than the old plain-JS
+#      syntax check: this catches real type errors, not just parse
+#      errors. No dependencies beyond npm install, no secrets, always
+#      runs.
 #   3. boot-test     — installs deps, confirms they actually
-#      installed, boots the real server, and checks the actual
-#      response BODY of /api/health (not just an HTTP 2xx) and
-#      /api/docs, plus confirms the unimplemented /api/verify
-#      endpoint fails loudly rather than silently succeeding.
-#      No secrets needed yet: the current skeleton doesn't call
-#      any external API on startup. This will need to gate on an
-#      API key secret once services/extraction.ts is implemented
-#      with a real vision/OCR call, same pattern as
+#      installed, compiles (npm run build), boots the compiled server
+#      (dist/server.js, the same artifact Docker/production actually
+#      runs), and checks the actual response BODY of /api/health (not
+#      just an HTTP 2xx) and /api/docs, plus confirms the
+#      unimplemented /api/verify endpoint fails loudly rather than
+#      silently succeeding. No secrets needed yet: the current
+#      skeleton doesn't call any external API on startup. This will
+#      need to gate on an API key secret once services/extraction.ts
+#      is implemented with a real vision/OCR call, same pattern as
 #      insight-engine-rag's eval-harness job checks for
 #      OPENAI_API_KEY before running.
 #
@@ -59,10 +63,13 @@ name: Code Checks (type-check + boot test)
     branches: [main]
   pull_request:
     branches: [main]
+  # Without this, the workflow only shows in the Actions sidebar
+  # while at least one run exists. Clear the run history with no
+  # workflow_dispatch defined and the workflow disappears entirely,
+  # with no way to trigger it manually until the next real push.
   workflow_dispatch: {}
 
 jobs:
-
   frontend-build:
     name: Frontend build check
     runs-on: ubuntu-latest
@@ -106,13 +113,15 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
+        # Full install, not --omit=dev: typescript and @types/* are
+        # devDependencies, needed here to type-check at all.
         run: npm install
 
       - name: Type-check entire backend (no output emitted)
         run: npx tsc --noEmit
-  
+
   boot-test:
-    name: Boot test (live server)
+    name: Boot test (live server, compiled output)
     runs-on: ubuntu-latest
     defaults:
       run:
