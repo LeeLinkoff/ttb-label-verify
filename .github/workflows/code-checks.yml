@@ -1,0 +1,213 @@
+name: Code Checks (type-check + boot test)
+
+# ============================================================
+# PURPOSE: Confirm the backend is sound. Does NOT touch the VPS
+# and does NOT deploy anything. This is a pass/fail gate only.
+#
+# TRIGGERS: automatically, on every push to main AND every pull
+# request targeting main. Runs on GitHub's disposable runner,
+# never on your VPS.
+# ============================================================
+#
+# Three jobs. The first two, in increasing order of what they
+# actually require, cover the backend:
+#   1. frontend-build — installs deps, runs the real production
+#      build (npm run build), and confirms dist/index.html actually
+#      got created. Independent of the other two jobs, runs in
+#      parallel, not sequentially after them.
+#   2. type-check — the full backend type-checks cleanly under
+#      strict: true (npx tsc --noEmit). No dependencies beyond npm
+#      install, no secrets, always runs.
+#   3. boot-test     — installs deps, confirms they actually
+#      installed, boots the real server, and checks the actual
+#      response BODY of /api/health (not just an HTTP 2xx) and
+#      /api/docs, plus confirms the unimplemented /api/verify
+#      endpoint fails loudly rather than silently succeeding.
+#      No secrets needed yet: the current skeleton doesn't call
+#      any external API on startup. This will need to gate on an
+#      API key secret once services/extraction.ts is implemented
+#      with a real vision/OCR call, same pattern as
+#      insight-engine-rag's eval-harness job checks for
+#      OPENAI_API_KEY before running.
+#
+# Every multi-line `run:` block below uses `set -euo pipefail`, not
+# just `set -e`: `-u` fails loudly on an unset variable instead of
+# silently treating it as empty, and `-o pipefail` makes a failure
+# anywhere in a piped command fail the whole step instead of only
+# reflecting the exit code of the last command in the pipe. This is
+# the same standard used in deploy-to-vps.yml.
+#
+# NOTE: There is no eval harness yet, because there is no matching
+# logic yet, services/extraction.ts and services/matching.ts both
+# throw "not implemented". Once those are built out, add a real eval
+# job here the same way insight-engine-rag's ci.yml does: boot the
+# server, run a fixed set of test labels through /api/verify, and
+# assert on expected match/no-match results per field.
+#
+# RELATIONSHIP TO deploy-to-vps.yml: deploy-to-vps.yml's own
+# verify-build job re-runs a similar (not identical) set of checks
+# as a final gate immediately before touching the VPS. That overlap
+# is deliberate, not a mistake, this file is the fast day-to-day
+# check on every push/PR, deploy-to-vps.yml's copy is a last-line
+# check right before production changes.
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  frontend-build:
+    name: Frontend build check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Production build
+        run: npm run build
+
+      - name: Confirm build output exists
+        run: |
+          set -euo pipefail
+          if [ ! -f "dist/index.html" ]; then
+            echo "ERROR: npm run build reported success but dist/index.html is missing."
+            echo "Check vite.config.js for a custom build.outDir pointing elsewhere."
+            exit 1
+          fi
+          echo "Frontend build output confirmed at dist/index.html"
+
+  type-check:
+    name: Type check (TypeScript, strict)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type-check entire backend (no output emitted)
+        run: npx tsc --noEmit
+  
+  boot-test:
+    name: Boot test (live server)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    needs: [type-check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Confirm dependencies actually installed
+        # npm install can exit 0 in edge cases (cache issues, partial
+        # installs) without producing a usable node_modules. Fail here
+        # with a clear message instead of a confusing "Cannot find
+        # module 'express'" a step later when the server tries to boot.
+        run: |
+          set -euo pipefail
+          if [ ! -d "node_modules" ]; then
+            echo "ERROR: node_modules not found after npm install."
+            exit 1
+          fi
+          if [ ! -d "node_modules/express" ]; then
+            echo "ERROR: node_modules exists but express is missing. Install may be incomplete."
+            exit 1
+          fi
+          echo "Dependencies confirmed installed."
+
+      - name: Start server in background
+        env:
+          PORT: 3002
+        run: |
+          set -euo pipefail
+          npm run build
+          nohup node dist/server.js > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for server to become healthy
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:3002/api/health > /dev/null; then
+              echo "Server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become healthy in time"
+          cat server.log
+          exit 1
+
+      - name: Confirm /api/health response body reports ok:true
+        # A 2xx status alone doesn't prove the service is actually
+        # healthy, a handler bug could return 200 with {"ok": false}
+        # or malformed JSON and the previous step would still pass.
+        # Check the actual body, not just the status code.
+        run: |
+          set -euo pipefail
+          BODY=$(curl -sf http://127.0.0.1:3002/api/health)
+          echo "Response body: $BODY"
+          OK=$(echo "$BODY" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).ok===true)}catch(e){console.log('false')}})")
+          if [ "$OK" != "true" ]; then
+            echo "ERROR: /api/health responded but body did not report ok:true."
+            exit 1
+          fi
+          echo "/api/health body confirmed ok:true."
+
+      - name: Confirm Swagger docs respond
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L http://127.0.0.1:3002/api/docs)
+          if [ "$STATUS" != "200" ]; then
+            echo "Expected 200 from /api/docs, got $STATUS"
+            exit 1
+          fi
+          echo "/api/docs confirmed 200."
+
+      - name: Confirm unimplemented endpoints fail loudly, not silently
+        # /api/verify should return a real error (currently 501) rather
+        # than a false 200, since extraction/matching aren't built yet.
+        # This catches an accidental "it looks like it works" regression
+        # where a stub silently starts returning 200 with empty data.
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:3002/api/verify)
+          if [ "$STATUS" == "200" ]; then
+            echo "WARNING: /api/verify returned 200. If extraction/matching are now implemented, update this check."
+            exit 1
+          fi
+          echo "/api/verify confirmed non-200 (currently expected: 501)."
+
+      - name: Show server log on failure
+        if: failure()
+        run: cat server.log
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true

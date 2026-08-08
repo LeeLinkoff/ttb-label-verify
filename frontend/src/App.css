@@ -1,0 +1,166 @@
+/* ── Global reset & base styles ──
+   Design tokens match leelinkoff.com/mvps/rag/ (Insight Engine) for a
+   consistent look across MVPs. */
+:root {
+  color-scheme: light only;
+  --bg: #f0f2f5;
+  --text: #111827;
+  --muted: #4b5563;
+  --card: #f9fafb;
+  --border: #e5e7eb;
+  --accent: #2563eb;
+  --accentHover: #1d4ed8;
+  --radius: 16px;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  line-height: 1.5;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accentHover);
+  text-decoration: underline;
+}
+
+h1, h2, h3 {
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+button {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 650;
+  font-family: inherit;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  transition: transform 0.02s ease, background 0.15s ease, border-color 0.15s ease;
+  min-height: 40px;
+}
+button:hover {
+  border-color: #cbd5e1;
+}
+button:active {
+  transform: translateY(1px);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input, textarea {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: #e8eaed !important;
+  border: none !important;
+  border-radius: 8px;
+  padding: 9px 12px;
+  width: 100%;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.10) !important;
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+  -webkit-appearance: none;
+  appearance: none;
+}
+input:focus, textarea:focus {
+  outline: none !important;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.16), 0 0 0 2px var(--accent) !important;
+}
+
+/* ── App shell ── */
+.app-shell {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 40px 20px 80px;
+}
+
+.app-header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.app-title {
+  font-size: 28px;
+  font-weight: 800;
+  background: linear-gradient(90deg, var(--accent), #7c3aed);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.app-subtitle {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+/* ── Card ── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+/* ── Status pill ── */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex-shrink: 0;
+}
+.status-dot.ok {
+  background: #16a34a;
+}
+.status-dot.error {
+  background: #dc2626;
+}
+
+/* ── Buttons: primary gradient variant ── */
+.btn-primary {
+  background: linear-gradient(90deg, var(--accent), var(--accentHover));
+  color: #ffffff;
+  border: none;
+}
+.btn-primary:hover {
+  filter: brightness(1.05);
+  border-color: transparent;
+}

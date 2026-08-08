@@ -1,0 +1,353 @@
+name: Deploy to VPS
+
+# ============================================================
+# PURPOSE: Actually ship this app to the live VPS. This is the
+# only workflow that touches production, restarts the backend
+# container, rebuilds the frontend, and publishes it.
+#
+# TRIGGERS: automatically, on every push to main; also runnable
+# by hand from the GitHub Actions tab (workflow_dispatch), for
+# a manual re-deploy without a new commit.
+# ============================================================
+#
+# Two-stage deploy: verify first, deploy second, deploy only runs if
+# verify passes. Nothing gets synced to the VPS unless it's already
+# confirmed to build cleanly on GitHub's own disposable runner.
+# Adapted from insight-engine-rag's deploy.yml; see that repo for the
+# original and its full reasoning notes.
+#
+#   1. verify-build — runs entirely on the GitHub runner, touches the
+#      VPS not at all:
+#        - required secrets are actually present (fails fast, before
+#          SSH is even attempted, with a clear message instead of a
+#          confusing failure four steps later)
+#        - frontend: npm run build (the real compile step)
+#        - backend: npx tsc --noEmit (strict type check) + Docker build
+#      If any of this fails, the workflow stops here. Nothing touches
+#      the VPS.
+#
+#   2. deploy — only runs if verify-build succeeded:
+#        - create the VPS project directories if they don't exist yet
+#          (first deploy to a fresh VPS, or a renamed VPS_PROJECT_PATH,
+#          shouldn't require manually mkdir-ing anything by hand first)
+#        - rsync source (not build output) to the VPS, verified
+#          afterward by confirming server.ts actually landed
+#        - write backend/.env from the OPENAI_API_KEY GitHub Secret,
+#          same rotation approach as insight-engine-rag: rotate the
+#          key once in GitHub Secrets, the next deploy pushes it to
+#          the VPS automatically, no manual step on the VPS itself
+#        - rebuild + restart the backend Docker container, verified
+#          afterward by confirming the container is actually running
+#          (not just that `docker run` exited 0)
+#        - build the frontend inside a throwaway Docker container on
+#          the VPS itself, verified afterward by confirming dist/
+#          actually contains an index.html
+#        - rsync the VPS-built dist/ into Apache's static directory,
+#          a DIFFERENT subpath than insight-engine-rag
+#          (/mvps/label-verify/, not /mvps/rag/), so the two MVPs can
+#          run side by side without colliding, verified afterward by
+#          confirming index.html landed in the Apache directory
+#        - verify /api/health responds through the public domain,
+#          with the actual response body printed on failure instead
+#          of just "it didn't work"
+#
+# Every remote step below runs with `set -e -u -o pipefail`, not just
+# `set -e`: `-u` fails loudly on an unset variable instead of silently
+# treating it as empty, and `-o pipefail` makes a failure anywhere in
+# a piped command (e.g. `docker build ... | tee log`) fail the whole
+# step instead of only reflecting the exit code of the last command
+# in the pipe.
+#
+# RELATIONSHIP TO code-checks.yml: this workflow's own verify-build
+# job re-runs a similar (not identical) set of checks as one final
+# gate immediately before touching the VPS. code-checks.yml is the
+# fast day-to-day check on every push/PR; this file's copy is the
+# last-line check right before production actually changes.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST            e.g. 162.214.120.12 (same VPS as insight-engine-rag)
+#   VPS_USER            e.g. root
+#   VPS_SSH_KEY          private key with SSH access to the VPS
+#   VPS_PROJECT_PATH     e.g. /opt/label-verify — MUST be a different
+#                        path than insight-engine-rag's VPS_PROJECT_PATH,
+#                        or the two deploys will overwrite each other
+#   PUBLIC_HEALTH_URL    e.g. https://leelinkoff.com/api/label-verify-health
+#                        (or however the Apache config routes this app's
+#                        health check; must not collide with the RAG
+#                        app's /api/health on the same origin)
+#   OPENAI_API_KEY       only needed once services/extraction.ts calls
+#                        a real vision/OCR provider; the pipeline writes
+#                        it to the VPS on every deploy regardless, so
+#                        rotation only ever needs updating here
+#
+# SSH key setup: same as insight-engine-rag, use a dedicated SSH
+# keypair, not the VPS root password. See that repo's deploy.yml for
+# the exact ssh-keygen steps.
+
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  verify-build:
+    name: Verify build (GitHub runner, no VPS involved)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Frontend — install deps
+        working-directory: frontend
+        run: npm install
+
+      - name: Frontend — production build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Frontend — confirm build output exists
+        working-directory: frontend
+        run: |
+          if [ ! -f "dist/index.html" ]; then
+            echo "ERROR: npm run build reported success but dist/index.html is missing."
+            echo "Check vite.config.js for a custom build.outDir pointing elsewhere."
+            exit 1
+          fi
+          echo "Frontend build output confirmed at dist/index.html"
+
+      - name: Backend — install deps
+        working-directory: backend
+        run: npm install
+
+      - name: Backend — type check (strict TypeScript)
+        working-directory: backend
+        run: npx tsc --noEmit
+
+      # GitHub-hosted runners include Docker by default, so the actual
+      # Docker build (same command build_back.bat runs locally, same
+      # Dockerfile the VPS deploy step uses) is verified here, on
+      # disposable infrastructure, before deploy touches the real VPS.
+      - name: Backend — Docker build
+        working-directory: backend
+        run: docker build -t ttb-label-verify-backend-verify .
+
+  deploy:
+    name: Deploy backend + frontend to VPS
+    runs-on: ubuntu-latest
+    needs: [verify-build]
+    steps:
+      # Fails fast, before SSH is even attempted, with a clear message
+      # naming exactly which secret is missing. Without this, a missing
+      # secret shows up later as an opaque SSH or rsync failure that's
+      # harder to diagnose. OPENAI_API_KEY is intentionally NOT checked
+      # here, it's allowed to be blank until extraction.ts needs it for
+      # real; every other secret is required for the deploy to make sense.
+      #
+      # Deliberately lives here in `deploy`, not in `verify-build`.
+      # verify-build never touches the VPS and is meant to be safe and
+      # secret-free to run locally via act (see dev_scripts\test_deploy_yml.bat).
+      # Requiring VPS secrets there would break that guarantee.
+      - name: Confirm required secrets are set
+        run: |
+          missing=""
+          [ -z "${{ secrets.VPS_HOST }}" ] && missing="$missing VPS_HOST"
+          [ -z "${{ secrets.VPS_USER }}" ] && missing="$missing VPS_USER"
+          [ -z "${{ secrets.VPS_SSH_KEY }}" ] && missing="$missing VPS_SSH_KEY"
+          [ -z "${{ secrets.VPS_PROJECT_PATH }}" ] && missing="$missing VPS_PROJECT_PATH"
+          [ -z "${{ secrets.PUBLIC_HEALTH_URL }}" ] && missing="$missing PUBLIC_HEALTH_URL"
+          if [ -n "$missing" ]; then
+            echo "Missing required repository secrets:$missing"
+            echo "Set these under Settings -> Secrets and variables -> Actions before deploying."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Confirm SSH connection to VPS
+        # Fails here, with a clear message, if the host/user/key combo
+        # is wrong, instead of failing more confusingly on the first
+        # real step that needs SSH.
+        run: |
+          ssh -o ConnectTimeout=10 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" 'echo "SSH connection OK, connected as $(whoami) on $(hostname)"'
+
+      - name: Create VPS project directories if they don't exist
+        # First deploy to a fresh VPS, or a renamed VPS_PROJECT_PATH,
+        # shouldn't require manually mkdir-ing anything by hand first.
+        # mkdir -p is a no-op if the directories already exist.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            mkdir -p "${{ secrets.VPS_PROJECT_PATH }}/backend"
+            mkdir -p "${{ secrets.VPS_PROJECT_PATH }}/frontend"
+            mkdir -p "/home/leelinko/public_html/mvps/label-verify"
+            echo "VPS directories confirmed/created."
+          '
+
+      - name: Sync source files to VPS
+        # Excludes node_modules, dist, and .env, same as insight-engine-rag.
+        # .env is written by a later step, not synced, so this and that
+        # step never conflict.
+        run: |
+          set -eo pipefail
+          rsync -az --delete \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude '.env' \
+            --exclude '.git' \
+            ./backend/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PROJECT_PATH }}/backend/"
+          rsync -az --delete \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude '.git' \
+            ./frontend/ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ secrets.VPS_PROJECT_PATH }}/frontend/"
+
+      - name: Confirm source files actually landed on the VPS
+        # rsync can exit 0 while transferring nothing if paths are wrong
+        # on either end. Check the files are really there before trusting
+        # the next steps build against real source.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if [ ! -f "${{ secrets.VPS_PROJECT_PATH }}/backend/server.ts" ]; then
+              echo "ERROR: backend/server.ts not found on VPS after rsync."
+              exit 1
+            fi
+            if [ ! -f "${{ secrets.VPS_PROJECT_PATH }}/frontend/package.json" ]; then
+              echo "ERROR: frontend/package.json not found on VPS after rsync."
+              exit 1
+            fi
+            echo "Source files confirmed present on VPS."
+          '
+
+      # Writes backend/.env from the OPENAI_API_KEY GitHub Secret on every
+      # deploy, same rotation approach as insight-engine-rag: rotate the
+      # key once in GitHub Secrets, the next deploy pushes it automatically.
+      # rsync above deliberately excludes .env so this is the only place
+      # that writes it, no risk of the two conflicting.
+      - name: Write backend .env from GitHub Secrets
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" > "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"
+            echo "PORT=3002" >> "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"
+          '
+
+      - name: Confirm .env was written on the VPS
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if [ ! -f "${{ secrets.VPS_PROJECT_PATH }}/backend/.env" ]; then
+              echo "ERROR: backend/.env was not created on the VPS."
+              exit 1
+            fi
+            if ! grep -q "^PORT=" "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"; then
+              echo "ERROR: backend/.env exists but has no PORT= line."
+              exit 1
+            fi
+            echo "backend/.env confirmed present with a PORT line."
+          '
+
+      - name: Rebuild and restart backend container
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            cd "${{ secrets.VPS_PROJECT_PATH }}/backend"
+            docker build -t ttb-label-verify-backend .
+            docker rm -f ttb-label-verify-backend || true
+            docker run -d \
+              --name ttb-label-verify-backend \
+              --restart unless-stopped \
+              -p 3002:3002 \
+              --env-file .env \
+              ttb-label-verify-backend
+          '
+
+      - name: Confirm backend container is actually running
+        # `docker run` can exit 0 even if the container crashes moments
+        # later (bad env var, port conflict, etc). Give it a moment,
+        # then check `docker ps`, not just the exit code of `docker run`.
+        run: |
+          sleep 3
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if ! docker ps --filter "name=ttb-label-verify-backend" --filter "status=running" | grep -q ttb-label-verify-backend; then
+              echo "ERROR: ttb-label-verify-backend container is not running after deploy."
+              echo "Recent container logs:"
+              docker logs --tail 50 ttb-label-verify-backend || true
+              exit 1
+            fi
+            echo "Backend container confirmed running."
+          '
+
+      - name: Build frontend in a throwaway Docker container (on the VPS)
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            docker run --rm \
+              -v "${{ secrets.VPS_PROJECT_PATH }}/frontend:/app" \
+              -w /app \
+              node:20-alpine sh -c "npm install && npm run build"
+          '
+
+      - name: Confirm frontend build output exists on the VPS
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if [ ! -f "${{ secrets.VPS_PROJECT_PATH }}/frontend/dist/index.html" ]; then
+              echo "ERROR: frontend/dist/index.html not found on VPS after build."
+              exit 1
+            fi
+            echo "Frontend build output confirmed on VPS."
+          '
+
+      - name: Deploy built frontend to Apache static directory
+        # Different subpath than insight-engine-rag's /mvps/rag/, so
+        # both MVPs can be live on the same VPS at once. Directory was
+        # already created by the "Create VPS project directories" step.
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            rsync -a --delete \
+              "${{ secrets.VPS_PROJECT_PATH }}/frontend/dist/" \
+              /home/leelinko/public_html/mvps/label-verify/
+          '
+
+      - name: Confirm frontend files landed in the Apache directory
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -eu
+            if [ ! -f "/home/leelinko/public_html/mvps/label-verify/index.html" ]; then
+              echo "ERROR: index.html not found in Apache static directory after rsync."
+              exit 1
+            fi
+            echo "Frontend confirmed live in Apache static directory."
+          '
+
+      - name: Verify backend health through the public domain
+        run: |
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -s "${{ secrets.PUBLIC_HEALTH_URL }}")
+            if curl -sf "${{ secrets.PUBLIC_HEALTH_URL }}" > /dev/null; then
+              echo "Deployment verified healthy."
+              echo "Response: $RESPONSE"
+              exit 0
+            fi
+            echo "Attempt $i/10: not healthy yet. Last response: $RESPONSE"
+            sleep 2
+          done
+          echo "Health check failed after deployment. Last response body above."
+          exit 1

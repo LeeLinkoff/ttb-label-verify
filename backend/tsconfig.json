@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "lib": ["ES2020"]
+  },
+  "include": ["server.ts", "swagger-spec.ts", "services/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
