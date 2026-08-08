@@ -5,8 +5,11 @@ name: Code Checks (type-check + boot test)
 # and does NOT deploy anything. This is a pass/fail gate only.
 #
 # TRIGGERS: automatically, on every push to main AND every pull
-# request targeting main. Runs on GitHub's disposable runner,
-# never on your VPS.
+# request targeting main; also runnable by hand from the GitHub
+# Actions tab (workflow_dispatch), useful after clearing run
+# history, since a workflow with no runs and no workflow_dispatch
+# disappears from the Actions sidebar entirely. Runs on GitHub's
+# disposable runner, never on your VPS.
 # ============================================================
 #
 # Three jobs. The first two, in increasing order of what they
@@ -56,6 +59,7 @@ name: Code Checks (type-check + boot test)
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
 
 jobs:
 
