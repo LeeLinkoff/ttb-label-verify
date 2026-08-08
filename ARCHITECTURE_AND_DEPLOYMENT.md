@@ -256,6 +256,21 @@ matches first wins, and the other app's API becomes unreachable.
 This app's proxy rule is nested under its own subpath instead, so it
 can't collide with anything else on the same VPS.
 
+### Why different internal ports (3001 vs 3002) don't already solve this
+
+They solve a different problem. Apache decides which `ProxyPass` rule
+to use based entirely on the incoming request's **URL path**, before
+it ever looks at where that rule points to. If two rules both matched
+`/api/`, Apache picks one, the other never fires for any `/api/*`
+request, full stop. The target ports only matter *after* a rule has
+already been selected, they have no bearing on which rule Apache
+chooses in the first place. Ports keep the two Docker containers from
+colliding with each other on the VPS (two processes can't both bind
+the same port), but that's a completely separate problem from two
+public URL patterns colliding at the Apache layer. Giving each app
+its own path prefix is what actually fixes the URL-matching
+collision, the ports were never going to.
+
 ### This is a manual, one-time step, not automated
 
 `deploy-to-vps.yml` deploys the app (syncs source, rebuilds the
@@ -289,8 +304,8 @@ existing `/api/` block, not a separate file:
 ```apache
 <IfModule mod_proxy.c>
     ProxyPreserveHost On
-    ProxyPass "/mvps/label-verify/api/" "http://127.0.0.1:3002/"
-    ProxyPassReverse "/mvps/label-verify/api/" "http://127.0.0.1:3002/"
+    ProxyPass "/mvps/label-verify/api/" "http://127.0.0.1:3002/api/"
+    ProxyPassReverse "/mvps/label-verify/api/" "http://127.0.0.1:3002/api/"
 </IfModule>
 ```
 
