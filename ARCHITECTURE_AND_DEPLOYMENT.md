@@ -234,6 +234,18 @@ live VPS. See the top-level `README.md`'s CI/CD section for why this
 matters, including a real bug this local testing already caught
 before any code was committed.
 
+A narrower check runs even earlier, at commit time: a git pre-commit
+hook (`.githooks\pre-commit`, wired in once via
+`dev_scripts\setup_git_hooks.bat`) runs `actionlint`/`shellcheck`
+against any staged workflow YAML or shell script and blocks the
+commit on a syntax error, the class of bug `act` only catches once it
+actually executes the broken step. This is a direct response to a
+real incident: an apostrophe inside a single-quoted `ssh '...'`
+remote command in `deploy-to-vps.yml`'s "Confirm Apache has the
+ProxyPass rule" step reached a real GitHub Actions run and broke it
+in production before this hook existed. See the top-level `README.md`
+CI/CD section for the full writeup and setup.
+
 ## 2.3 Manual deployment (fallback reference)
 
 If the automated pipeline needs debugging, here's what it's doing

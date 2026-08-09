@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# .githooks/pre-commit
+#
+# Blocks a commit if any staged GitHub Actions workflow YAML fails
+# actionlint (which runs shellcheck against every embedded `run:`
+# block), or any staged .sh file fails shellcheck directly.
+#
+# This exists because a bash syntax error inside deploy-to-vps.yml
+# (an apostrophe inside a single-quoted `ssh '...'` remote command)
+# made it all the way to a real deploy run before it surfaced, as a
+# runner-side "syntax error near unexpected token" rather than
+# anything caught before commit. actionlint would have caught it
+# locally, before it was ever pushed.
+#
+# One-time setup (per clone): dev_scripts\setup_git_hooks.bat
+#   (or manually: git config core.hooksPath .githooks)
+#
+# To skip this check for one commit only (not recommended):
+#   git commit --no-verify
+
+set -uo pipefail
+
+STAGED_YML=$(git diff --cached --name-only --diff-filter=ACM -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+STAGED_SH=$(git diff --cached --name-only --diff-filter=ACM -- '*.sh')
+
+FAILED=0
+
+if [ -n "$STAGED_YML" ]; then
+  if ! command -v actionlint >/dev/null 2>&1; then
+    echo "============================================================"
+    echo " ERROR: actionlint is not installed, cannot check staged"
+    echo " GitHub Actions workflow file(s):"
+    echo "$STAGED_YML"
+    echo ""
+    echo " Install it, then commit again:"
+    echo "   choco install actionlint"
+    echo "   scoop install actionlint"
+    echo "   winget install actionlint"
+    echo ""
+    echo " To skip this check for this commit only: git commit --no-verify"
+    echo "============================================================"
+    FAILED=1
+  else
+    echo "Running actionlint on staged workflow file(s)..."
+    # shellcheck disable=SC2086
+    if ! actionlint $STAGED_YML; then
+      echo ""
+      echo "============================================================"
+      echo " ERROR: actionlint found problems in the workflow file(s)"
+      echo " above. Fix them before committing, or: git commit --no-verify"
+      echo "============================================================"
+      FAILED=1
+    fi
+  fi
+fi
+
+if [ -n "$STAGED_SH" ]; then
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo "============================================================"
+    echo " ERROR: shellcheck is not installed, cannot check staged"
+    echo " shell script(s):"
+    echo "$STAGED_SH"
+    echo ""
+    echo " Install it, then commit again:"
+    echo "   choco install shellcheck"
+    echo "   scoop install shellcheck"
+    echo "   winget install --id koalaman.shellcheck"
+    echo ""
+    echo " To skip this check for this commit only: git commit --no-verify"
+    echo "============================================================"
+    FAILED=1
+  else
+    echo "Running shellcheck on staged shell script(s)..."
+    # shellcheck disable=SC2086
+    if ! shellcheck $STAGED_SH; then
+      echo ""
+      echo "============================================================"
+      echo " ERROR: shellcheck found problems in the script(s) above."
+      echo " Fix them before committing, or: git commit --no-verify"
+      echo "============================================================"
+      FAILED=1
+    fi
+  fi
+fi
+
+exit $FAILED

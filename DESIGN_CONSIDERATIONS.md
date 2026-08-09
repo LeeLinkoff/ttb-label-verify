@@ -41,6 +41,29 @@ secret-free and safe to run locally) instead of the right one
 (`deploy`). Found and fixed locally in seconds via `act`, instead of
 discovered later as a confusing failure on GitHub's runner.
 
+## Pre-commit lint hook: caught a real bug act didn't
+
+`act` (see "Build approach" above) catches a broken workflow step
+once it actually runs, but a plain bash syntax error inside a `run:`
+block got past both `act` and manual review anyway: an apostrophe
+inside a single-quoted `ssh '...'` remote command in
+`deploy-to-vps.yml` (`cPanel's`, closing the quote early, with the
+rest of the script then parsed as literal shell) reached a real
+GitHub Actions run and broke the "Confirm Apache has the ProxyPass
+rule" step in production, not caught locally first this time.
+
+Added a git pre-commit hook (`.githooks/pre-commit`,
+`dev_scripts/setup_git_hooks.bat` for one-time setup) that runs
+`actionlint` against staged workflow YAML and `shellcheck` against
+staged shell scripts, blocking the commit on a syntax error before it
+can reach GitHub at all, a cheaper and earlier check than waiting for
+`act` to execute the step. Verified against the actual bug, not just
+assumed to work: run against a throwaway git repo with the original
+broken `deploy-to-vps.yml` staged, `actionlint` blocked the commit
+and correctly identified the exact line (`SC1011: This apostrophe
+terminated the single quoted string!`); run again against the fixed
+file, the commit went through clean.
+
 ## Backend language: converted to TypeScript
 
 The backend started as plain JavaScript (steps 1-4 above describe
