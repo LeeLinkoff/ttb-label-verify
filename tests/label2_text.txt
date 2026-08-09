@@ -1,0 +1,4 @@
+brandName:      SILVER CREEK DISTILLERY
+classType:      Vodka
+alcoholContent: 40% Alc./Vol. (80 Proof)
+netContents:    750 mL
