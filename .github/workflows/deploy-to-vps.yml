@@ -260,7 +260,7 @@ jobs:
               echo "Then: apachectl configtest && /usr/local/cpanel/scripts/restartsrv_httpd --graceful"
               echo "(NOT systemctl restart httpd, confirmed on this VPS to silently"
               echo "no-op: apachectl reports the new config valid but real requests"
-              echo "keep 404ing. Use cPanel's own service script, see"
+              echo "keep 404ing. Use the cPanel service script, see"
               echo "ARCHITECTURE_AND_DEPLOYMENT.md 2.4 for the full explanation.)"
               echo ""
               echo "See ARCHITECTURE_AND_DEPLOYMENT.md section 2.4 for the full explanation."
