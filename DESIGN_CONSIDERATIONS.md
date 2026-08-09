@@ -70,11 +70,32 @@ type-check under `strict: true`, in both `code-checks.yml` and
 Interviewer stated verbally (not in the README) not to spend more
 than 1 hour on this assessment. Given the actual scope (vision/OCR
 extraction, exact legal-text matching, batch handling, an accessible
-UI, and a live deployment), that is not realistic for a complete
-build. Documented as an accommodation consideration separately.
-Scope decisions throughout this log are made assuming more than an
-hour was actually available, with the narrowest complete core
-prioritized over a broader partial one.
+UI, and a live deployment), that estimate is not grounded in the
+reality of what this task involves, unless it assumes a pre-built
+environment already configured (repo scaffolded, CI/CD already
+working, hosting already provisioned and proven, no errors
+encountered anywhere in the chain) and a zero-error run through every
+step. That is not a realistic assumption for a fresh build.
+
+Concrete evidence, not just assertion: even the deployment
+infrastructure alone, separate from the actual label-matching logic
+this assessment is meant to evaluate, took real, non-trivial
+debugging to get working end to end. Getting the live health check to
+pass involved diagnosing an Apache path-collision with an existing
+app, a wrong proxy target that silently dropped the required `/api/`
+prefix, and a cPanel-specific reload command that reports success
+while not actually reloading the config, each confirmed only by
+direct testing (backend curl, config syntax check, vhost dump, error
+log inspection), not guesswork. None of that is unusual or a sign of
+a poorly-run assessment, it's the normal texture of standing up a new
+service on shared infrastructure. It is, however, real evidence that
+one hour covers essentially none of the actual work this task
+requires, let alone the label-matching logic itself.
+
+Documented as an accommodation consideration separately. Scope
+decisions throughout this log are made assuming more than an hour was
+actually available, with the narrowest complete core prioritized over
+a broader partial one.
 
 ## Architecture
 
@@ -95,6 +116,17 @@ review-window traffic), and reusing an already-working deploy
 pipeline is faster than standing up new cloud infra under the time
 constraint. Trade-off: no managed redundancy, single VPS, accepted
 as reasonable for a short-lived demo.
+
+**Why Docker specifically, not just a plain Node process on the
+VPS.** Not a stylistic preference, a hard requirement discovered when
+insight-engine-rag was first deployed to this same VPS: the host's
+native Node installation is broken and extremely outdated, missing
+shared libraries it needs to run at all (e.g. `libbrotlidec.so.1`),
+confirmed directly, not assumed. Node cannot run natively on this
+host, full stop, which is why both the backend and the frontend's
+build step run inside Docker containers (the frontend using a
+throwaway container as a build environment, since it can't build on
+the host either) rather than as ordinary host processes.
 
 **Frontend theme reused from Insight Engine RAG** (same CSS custom
 properties, card/button/input styling) for visual consistency across
@@ -173,6 +205,80 @@ An open demo URL is used.
 ## Deployment platform
 
 Self-hosted VPS (Bluehost), not a free-tier platform like
-Vercel/Render/Railway, since the existing insight-engine-rag pipeline
-was already available and faster to reuse than standing up something
-new. Documented explicitly since nothing in the README specifies this.
+Vercel/Render/Railway, for two separate reasons. First, cost: paying
+for new hosting just to run an unpaid take-home assessment isn't a
+reasonable ask, and there was no need to, this VPS is already paid
+for and running for other purposes (it already hosts
+insight-engine-rag and other sites), so deploying here adds no new
+expense at all. Second, speed: the existing insight-engine-rag
+deploy pipeline was already available and faster to reuse than
+standing up new cloud infra under the time constraint. Documented
+explicitly since nothing in the README specifies a required or
+preferred hosting platform.
+
+## Apache reload gotcha (cPanel-specific)
+
+After adding this app's `ProxyPass` rule to the shared Apache config,
+the public endpoint still 404'd even with the config file confirmed
+correct and `apachectl -t` reporting `Syntax OK`. Backend confirmed
+healthy directly (`curl http://127.0.0.1:3002/api/health` returned
+200), ruling out the application. `apachectl -S` confirmed the
+correct vhost was being reached. The actual cause, found by checking
+Apache's error log directly rather than continuing to guess:
+`systemctl restart httpd` completed with no error but did not
+actually reload the running config, Apache kept serving the previous
+version. `/usr/local/cpanel/scripts/restartsrv_httpd --graceful`
+fixed it immediately, confirmed by a real `curl` returning the
+correct JSON body through the public HTTPS URL.
+
+Documented here because `systemctl restart httpd` looks like the
+obviously correct command on a service literally named `httpd`, and
+nothing about it failing is visible without checking behavior, not
+just exit codes. On this specific cPanel/EasyApache VPS, use the
+cPanel service script for any future Apache config change, not
+`systemctl` directly.
+
+## OpenAPI schema generation: generated, not hand-maintained
+
+`swagger-spec.ts`'s `components.schemas` block was originally
+hand-written, and went stale against the real code more than once
+during this build (endpoints still documented as `501` stubs after
+they were implemented, a field-formatting shape change in
+`ExtractedLabelFields` never reflected in the spec). Rather than keep
+manually syncing a parallel copy of every response type,
+`scripts/generate-openapi-schemas.ts` generates
+`schemas.generated.ts` directly from the actual exported TS
+interfaces (`FieldMatchResult`, `MatchResult`, `ApplicationData`,
+`BatchResultItem`, `ExtractedLabelFields`) using
+`ts-json-schema-generator`, then fixes up a handful of JSON-Schema-
+to-OpenAPI-3.0 differences (nullable unions, `$ref` path rewriting)
+that library doesn't handle natively.
+
+`paths` (routes, verbs, request bodies, status codes) stays
+hand-written. Express doesn't carry that metadata anywhere a
+generator could read it from without a heavier framework change
+(e.g. `tsoa`'s decorated-controller pattern), which would cut against
+the "thin router, plain-function services" split documented above.
+Generating the schemas half while hand-maintaining the paths half was
+the narrower fix for the actual problem (response shapes drifting),
+not a full OpenAPI-generation rewrite.
+
+Runs at build time only (`npm run generate:schemas`, wired into the
+Dockerfile before `tsc`, and into both `code-checks.yml` and
+`deploy-to-vps.yml`'s `verify-build` job before their own type-check
+steps), never against a live request. `schemas.generated.ts` is a
+build artifact, not something to hand-edit.
+
+One real bug surfaced by this: the `generate:schemas` npm script
+originally invoked `ts-node` directly (`ts-node scripts/generate-
+openapi-schemas.ts`). That hits a known, long-standing `ts-node` CLI
+bootstrap bug (`Cannot find module`, referencing an internal probe
+file `imaginaryUncacheableRequireResolveScript`) inconsistently
+across Node/`ts-node`/OS combinations, confirmed via multiple
+`TypeStrong/ts-node` GitHub issues going back to 2019, still
+reproducing on Node 22 in 2025. It didn't reproduce in every
+environment tested, which is exactly what made it worth documenting:
+a fix that "works on my machine" isn't verified. The script now runs
+via `node -r ts-node/register scripts/generate-openapi-schemas.ts`
+instead, which loads the same TypeScript-execution hook without going
+through the buggy CLI bootstrap.

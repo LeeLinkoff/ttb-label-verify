@@ -11,6 +11,7 @@ frontend/node_modules/
 backend/.env
 frontend/.env.local
 *.txt
+!tests/**/*.txt
 
 # ── Build output ──────────────────────────────────────────────
 dist/

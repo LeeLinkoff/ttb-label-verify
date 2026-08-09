@@ -19,23 +19,27 @@ name: Code Checks (type-check + boot test)
 #      build (npm run build), and confirms dist/index.html actually
 #      got created. Independent of the other two jobs, runs in
 #      parallel, not sequentially after them.
-#   2. type-check — the full backend type-checks cleanly under
-#      strict: true (npx tsc --noEmit). Stronger than the old plain-JS
+#   2. type-check — regenerates schemas.generated.ts (swagger-spec.ts
+#      imports it, it doesn't exist in a fresh checkout otherwise),
+#      then confirms the full backend type-checks cleanly under
+#      strict: true (npx tsc --noEmit). Stronger than a plain-JS
 #      syntax check: this catches real type errors, not just parse
-#      errors. No dependencies beyond npm install, no secrets, always
-#      runs.
+#      errors. No secrets needed, always runs.
 #   3. boot-test     — installs deps, confirms they actually
-#      installed, compiles (npm run build), boots the compiled server
-#      (dist/server.js, the same artifact Docker/production actually
-#      runs), and checks the actual response BODY of /api/health (not
-#      just an HTTP 2xx) and /api/docs, plus confirms the
-#      unimplemented /api/verify endpoint fails loudly rather than
-#      silently succeeding. No secrets needed yet: the current
-#      skeleton doesn't call any external API on startup. This will
-#      need to gate on an API key secret once services/extraction.ts
-#      is implemented with a real vision/OCR call, same pattern as
-#      insight-engine-rag's eval-harness job checks for
-#      OPENAI_API_KEY before running.
+#      installed, regenerates schemas.generated.ts, compiles
+#      (npm run build), boots the compiled server (dist/server.js,
+#      the same artifact Docker/production actually runs), and
+#      checks the actual response BODY of /api/health (not just an
+#      HTTP 2xx), /api/docs, plus confirms /api/verify returns 400
+#      on a request with no image. services/extraction.ts and
+#      services/matching.ts are both implemented now, extraction
+#      calls a real OpenAI vision model, so this job's own missing-
+#      image check exercises real validation logic, not a stub. It
+#      still does NOT exercise the real vision call end to end
+#      (that needs an OPENAI_API_KEY secret here plus a real test
+#      label image); add a real eval-harness job for that later,
+#      same pattern as insight-engine-rag's eval-harness job checks
+#      for OPENAI_API_KEY before running.
 #
 # Every multi-line `run:` block below uses `set -euo pipefail`, not
 # just `set -e`: `-u` fails loudly on an unset variable instead of
@@ -44,12 +48,13 @@ name: Code Checks (type-check + boot test)
 # reflecting the exit code of the last command in the pipe. This is
 # the same standard used in deploy-to-vps.yml.
 #
-# NOTE: There is no eval harness yet, because there is no matching
-# logic yet, services/extraction.ts and services/matching.ts both
-# throw "not implemented". Once those are built out, add a real eval
-# job here the same way insight-engine-rag's ci.yml does: boot the
-# server, run a fixed set of test labels through /api/verify, and
-# assert on expected match/no-match results per field.
+# NOTE: There is still no eval harness job here. services/extraction.ts
+# and services/matching.ts are now implemented (they no longer throw
+# "not implemented"), so this is no longer blocked on the logic not
+# existing, it's just not built yet. Add one the same way
+# insight-engine-rag's ci.yml does: gate on an OPENAI_API_KEY secret,
+# boot the server, run a fixed set of test labels through /api/verify,
+# and assert on expected match/no-match results per field.
 #
 # RELATIONSHIP TO deploy-to-vps.yml: deploy-to-vps.yml's own
 # verify-build job re-runs a similar (not identical) set of checks
@@ -113,9 +118,19 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        # Full install, not --omit=dev: typescript and @types/* are
-        # devDependencies, needed here to type-check at all.
+        # Full install, not --omit=dev: typescript, @types/*, and the
+        # OpenAPI schema generator (ts-json-schema-generator, ts-node)
+        # are all devDependencies, needed here to type-check and to
+        # generate schemas.generated.ts.
         run: npm install
+
+      - name: Generate OpenAPI schemas
+        # swagger-spec.ts imports ./schemas.generated, which doesn't
+        # exist in a fresh checkout, it's a build artifact (see
+        # scripts/generate-openapi-schemas.ts). Without this step,
+        # the next step fails on a missing module, not a real type
+        # error.
+        run: npm run generate:schemas
 
       - name: Type-check entire backend (no output emitted)
         run: npx tsc --noEmit
@@ -159,6 +174,7 @@ jobs:
           PORT: 3002
         run: |
           set -euo pipefail
+          npm run generate:schemas
           npm run build
           nohup node dist/server.js > server.log 2>&1 &
           echo $! > server.pid
@@ -203,19 +219,33 @@ jobs:
           fi
           echo "/api/docs confirmed 200."
 
-      - name: Confirm unimplemented endpoints fail loudly, not silently
-        # /api/verify should return a real error (currently 501) rather
-        # than a false 200, since extraction/matching aren't built yet.
-        # This catches an accidental "it looks like it works" regression
-        # where a stub silently starts returning 200 with empty data.
+      - name: Confirm /api/verify rejects a request with no image
+        # /api/verify is now implemented (services/extraction.ts and
+        # services/matching.ts no longer throw "not implemented").
+        # This step used to just check for "any non-200" as a stub
+        # sanity check; now that there's real validation, assert the
+        # specific expected code: 400, from server.ts's own check for
+        # a missing labelImage. This still catches the same class of
+        # regression the old check did (a silent, accidental 200 with
+        # no real data), just with a tighter, now-meaningful assertion
+        # instead of a placeholder one.
+        #
+        # This deliberately does NOT exercise the real vision call
+        # (that would need OPENAI_API_KEY as a secret here, and a real
+        # test label image checked into the repo or fetched at
+        # runtime). Only the pre-extraction validation path is
+        # covered. Add a real eval harness job (boot server, POST an
+        # actual label through /api/verify, assert on expected
+        # match/no-match per field) once you're ready to wire up that
+        # secret, same pattern as insight-engine-rag's eval-harness job.
         run: |
           set -euo pipefail
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:3002/api/verify)
-          if [ "$STATUS" == "200" ]; then
-            echo "WARNING: /api/verify returned 200. If extraction/matching are now implemented, update this check."
+          if [ "$STATUS" != "400" ]; then
+            echo "Expected 400 (missing labelImage) from /api/verify with no body, got $STATUS"
             exit 1
           fi
-          echo "/api/verify confirmed non-200 (currently expected: 501)."
+          echo "/api/verify confirmed 400 on missing labelImage."
 
       - name: Show server log on failure
         if: failure()

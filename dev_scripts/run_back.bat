@@ -41,9 +41,28 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM server.ts imports swagger-spec.ts, which imports ./schemas.generated.
+REM That file doesn't exist on a fresh checkout, it's a build artifact
+REM (see scripts/generate-openapi-schemas.ts). tsx transpiles server.ts
+REM on the fly with no separate compile step, so without this, the dev
+REM server fails immediately on a missing module, not a real code error.
+echo Regenerating OpenAPI schemas from services\*.ts...
+call npm run generate:schemas
+if errorlevel 1 (
+    echo.
+    echo ============================================================
+    echo  ERROR: npm run generate:schemas failed. See output above.
+    echo ============================================================
+    echo.
+    pause
+    exit /b 1
+)
+echo Schemas regenerated.
+echo.
+
 REM Runs server.ts directly via tsx, no manual compile step needed.
 REM Watches for changes and restarts automatically. Production uses
-REM the compiled dist/server.js instead, via build_back.bat/Docker.
+REM the compiled dist/server.js instead, via build_back_docker.bat/Docker.
 call npm run dev
 
 echo.

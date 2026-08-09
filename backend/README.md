@@ -12,43 +12,72 @@ actually runs, both locally and in the deployed Docker container.
 
 ## Status
 
-Skeleton. `/api/health` and `/api/docs` are real. `/api/verify` and
-`/api/verify/batch` exist as routes but return 501, since
-`services/extraction.ts` and `services/matching.ts` both throw
-"not implemented" until the vision/OCR and matching logic are built.
+`/api/health`, `/api/docs`, `/api/verify`, and `/api/verify/batch` are
+all implemented. `services/extraction.ts` calls an OpenAI vision model
+to extract label fields; `services/matching.ts` compares those fields
+against submitted application data. `/api/verify` returns `400` if no
+`labelImage` is provided, `502` if extraction or matching fails (e.g.
+vision API error, malformed model response), otherwise `200` with a
+`MatchResult`.
 
 ## Structure
 
-```
-server.ts               Thin router only: parses requests, calls a
-                          service, shapes the response. No business
-                          logic lives here.
-services/
-  extraction.ts          extractLabelFields(imageBuffer) -> fields.
-                          Will call a vision/OCR provider. Pure
-                          function, no Express dependency.
-  matching.ts             matchLabelToApplication(extracted, applicationData)
-                          -> per-field match result. Also holds the
-                          canonical Government Warning text (27 CFR
-                          16.21/16.22) and normalize() for tolerant
-                          field comparison. Pure function. Exports the
-                          ApplicationData, FieldMatchResult, and
-                          MatchResult interfaces used elsewhere.
-  batch.ts                verifyBatch(items) -> per-item results.
-                          Orchestrates extraction + matching per item
-                          with per-item error isolation, no logic of
-                          its own.
-swagger-spec.ts          OpenAPI 3.0 spec, maintained manually as a
-                          static file rather than generated from
-                          inline comments, same approach as
-                          insight-engine-rag.
-tsconfig.json            strict: true, outDir dist, compiles
-                          server.ts + swagger-spec.ts + services/**/*.ts.
-Dockerfile                node:20-alpine, port 3002. Full `npm install`
-                          (not --omit=dev, needs devDependencies to
-                          compile), then `npx tsc`, then runs the
-                          compiled `dist/server.js`.
-```
+- **`server.ts`** — Thin router only: parses requests, calls a
+  service, shapes the response. No business logic lives here.
+
+- **`services/extraction.ts`** — `extractLabelFields(imageBuffer,
+  mimeType) -> fields`. Calls an OpenAI vision model (Chat Completions
+  API, `image_url` content) to extract label fields. Model is
+  env-configurable via `OPENAI_VISION_MODEL`, currently defaults to
+  `gpt-5.6` (confirmed against OpenAI's own docs at the time this was
+  written; model availability has been churning fast, reconfirm this
+  is still a model your key has access to before relying on the
+  default).
+  `mimeType` is required (from Multer's `req.file.mimetype`) to build
+  a valid `data:` URL, there's no attempt to guess image format from
+  the buffer alone. Pure function, no Express dependency.
+
+- **`services/matching.ts`** — `matchLabelToApplication(extracted,
+  applicationData) -> per-field match result`. Also holds the
+  canonical Government Warning text (27 CFR 16.21/16.22) and
+  `normalize()` for tolerant field comparison. brandName, classType,
+  and netContents get normalize()-and-compare (a normalized mismatch
+  is flagged `needsReview`, not auto-rejected). alcoholContent gets a
+  presence/format check only. warningStatement requires exact text
+  match plus two independent formatting conditions per 27 CFR 16.22:
+  "GOVERNMENT WARNING" must be all-caps and bold, and the remainder of
+  the statement must NOT be bold. Pure function. Exports the
+  `ApplicationData`, `FieldMatchResult`, and `MatchResult` interfaces
+  used elsewhere.
+
+- **`services/batch.ts`** — `verifyBatch(items) -> per-item results`.
+  Orchestrates extraction + matching per item with per-item error
+  isolation, no logic of its own.
+
+- **`swagger-spec.ts`** — OpenAPI 3.0 spec. `components.schemas` is
+  generated directly from the actual TS interfaces in `services/` (see
+  `schemas.generated.ts` and `scripts/generate-openapi-schemas.ts`),
+  so response shapes can't drift out of sync with the code the way a
+  fully hand-maintained copy did earlier in this project. `paths`
+  (routes, verbs, request bodies, status codes) is still hand-written,
+  Express doesn't carry that metadata anywhere for a generator to read.
+
+- **`scripts/generate-openapi-schemas.ts`** — Generates
+  `schemas.generated.ts` from `ExtractedLabelFields`, `ApplicationData`,
+  `FieldMatchResult`, `MatchResult`, and `BatchResultItem` using
+  `ts-json-schema-generator`, then fixes up a few JSON-Schema-to-OpenAPI-3.0
+  differences (nullable unions, `$ref` paths). Run via
+  `npm run generate:schemas`. Runs automatically as part of the Docker
+  build, see Dockerfile below, `schemas.generated.ts` is a build
+  artifact, not something to hand-edit.
+
+- **`tsconfig.json`** — `strict: true`, `outDir dist`, compiles
+  `server.ts` + `swagger-spec.ts` + `services/**/*.ts`.
+
+- **`Dockerfile`** — `node:20-alpine`, port 3002. Full `npm install`
+  (not `--omit=dev`, needs devDependencies to compile and to run the
+  schema generator), then `npm run generate:schemas && npx tsc`, then
+  runs the compiled `dist/server.js`.
 
 ## Dockerfile, image, container: what's actually a file
 
@@ -98,22 +127,43 @@ reasoning.
 |---|---|---|
 | GET | `/api/health` | Live |
 | GET | `/api/docs` | Live (Swagger UI) |
-| POST | `/api/verify` | Stub, returns 501 |
-| POST | `/api/verify/batch` | Stub, returns 501 |
+| POST | `/api/verify` | Live. `200` on success, `400` if `labelImage` missing, `502` on extraction/matching failure |
+| POST | `/api/verify/batch` | Live. `200` with per-item results (each item independently `ok`/failed), `502` on batch-level failure (e.g. malformed `applications` JSON) |
 
-Full request/response shapes, including the planned ones, are in
-Swagger at `/api/docs` while the server is running.
+Full request/response shapes are in Swagger at `/api/docs` while the
+server is running, generated from the same interfaces the code
+actually uses (see `swagger-spec.ts` and `schemas.generated.ts` above).
 
 ## CI
 
 `.github/workflows/code-checks.yml` runs on every push and pull
-request to `main`: type-checks the entire backend under `strict: true`
-(`npx tsc --noEmit`), then compiles and boots the real compiled
-server, and checks the actual response body of `/api/health` (not
-just the status code), `/api/docs`, and confirms `/api/verify`
-correctly returns a non-200 while it's still a stub. Run it locally
-before pushing with `..\dev_scripts\test_code_checks_yml.bat` (via
-`act`).
+request to `main` (also runnable by hand via `workflow_dispatch`).
+This describes the fixed version delivered alongside this README
+update, not the file as it existed before this pass: the original
+had `type-check` running `npx tsc --noEmit` with no step generating
+`schemas.generated.ts` first, which `swagger-spec.ts` imports and
+which doesn't exist in a fresh checkout. That would have failed CI
+outright on the next push, not a docs mismatch, an actual break. Both
+`type-check` and `boot-test` now run `npm run generate:schemas` before
+compiling.
+
+Three jobs: `frontend-build` (independent, runs in parallel, confirms
+`dist/index.html` exists after a real production build), `type-check`
+(regenerates `schemas.generated.ts`, then `npx tsc --noEmit` under
+`strict: true`), and `boot-test` (installs deps, regenerates schemas,
+compiles, boots the real compiled `dist/server.js`, checks the actual
+response body of `/api/health`, not just the status code, confirms
+`/api/docs` responds, and confirms `/api/verify` returns `400` on a
+request with no image).
+
+That last check only exercises the missing-`labelImage` validation
+path in `server.ts`, it does not send a real label through the OpenAI
+vision call, so no `OPENAI_API_KEY` secret is needed for CI to pass
+today. There's still no eval harness that runs a real label image
+through `/api/verify` end to end and checks the match results, adding
+one (gated on an `OPENAI_API_KEY` secret) is the natural next step,
+the workflow's own comments note this. Run it locally before pushing
+with `..\dev_scripts\test_code_checks_yml.bat` (via `act`).
 
 ## Running
 
@@ -130,35 +180,70 @@ Or `..\dev_scripts\run_back.bat` on Windows, which checks for `.env`,
 frees port 3002 if something else is bound to it, and starts the dev
 server.
 
-**Production** (compiles first, then runs the compiled output, same
-as what Docker does):
+**Production** (regenerates schemas, compiles, then runs the compiled
+output, same steps Docker runs):
 
 ```
 npm install
+npm run generate:schemas
 npm run build
 node dist/server.js
 ```
 
+If your `package.json`'s `build` script doesn't already run
+`generate:schemas` as part of it, run them as two separate steps like
+above, otherwise `swagger-spec.ts` will fail to compile against a
+missing or stale `schemas.generated.ts`.
+
 Server starts at `http://127.0.0.1:3002`.
 
 ## Docker
+
+**Why Docker at all, not just running `node dist/server.js` directly
+on the VPS:** the production VPS host has no working Node install,
+it's broken and missing required shared libraries (see
+`ARCHITECTURE_AND_DEPLOYMENT.md` section 1.2 for the specifics). This
+container isn't a deployment preference, it's the only way this
+backend can actually run on that host at all.
 
 ```
 docker build -t ttb-label-verify-backend .
 docker run -d --name ttb-label-verify-backend --restart unless-stopped -p 3002:3002 --env-file .env ttb-label-verify-backend
 ```
 
-Or `..\dev_scripts\build_back.bat` on Windows. The Dockerfile compiles
-TypeScript to `dist/` during the image build, then runs `node dist/server.js`,
-it never runs `.ts` source directly in the container.
+Or `..\dev_scripts\build_back.bat` on Windows. The Dockerfile
+regenerates `schemas.generated.ts` from the service interfaces, then
+compiles TypeScript to `dist/` during the image build, then runs
+`node dist/server.js`, it never runs `.ts` source directly in the
+container. `.env` needs `OPENAI_API_KEY` (and optionally
+`OPENAI_VISION_MODEL`) for `--env-file .env` to actually work at
+runtime, see Environment variables below.
 
-## Known limitations (current skeleton state)
+## Environment variables
 
-- No vision/OCR call implemented yet, `/api/verify` cannot process a
-  real label.
+`.env.example`:
+```
+PORT=3002
+OPENAI_API_KEY=
+OPENAI_VISION_MODEL=
+```
+
+`OPENAI_API_KEY` is required, `/api/verify` and `/api/verify/batch`
+fail extraction without it. `OPENAI_VISION_MODEL` is optional,
+overrides the default vision model (`gpt-5.6`, see
+`services/extraction.ts` above), leave blank to use the default.
+
+## Known limitations
+
 - No persistence; nothing is stored between requests regardless.
 - No auth or rate limiting, consistent with the assumption in
   `DESIGN_CONSIDERATIONS.md` that this is acceptable for a prototype
   handling no sensitive data.
+- Per-label response time hasn't been measured against the ~5 second
+  target from the assessment outline. Depends entirely on OpenAI's
+  vision inference latency, not on anything in this codebase or on
+  Docker/VPS overhead. Worth timing with a real key before assuming
+  it clears the bar; if it doesn't, `OPENAI_VISION_MODEL` is there to
+  swap in something faster.
 - CORS is fully open, fine for a demo, would need restricting before
   any real deployment.

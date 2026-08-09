@@ -21,7 +21,9 @@ name: Deploy to VPS
 #        - required secrets are actually present (fails fast, before
 #          SSH is even attempted, with a clear message instead of a
 #          confusing failure four steps later)
-#        - backend: node --check (syntax) + Docker build
+#        - backend: regenerate schemas.generated.ts (swagger-spec.ts
+#          imports it, doesn't exist in a fresh checkout otherwise) +
+#          strict type check + Docker build
 #        - frontend: npm run build (the real compile step)
 #      If any of this fails, the workflow stops here. Nothing touches
 #      the VPS.
@@ -85,10 +87,22 @@ name: Deploy to VPS
 #                        not a bare /api/health, or it collides with
 #                        insight-engine-rag's proxy rule on the same
 #                        domain; see ARCHITECTURE_AND_DEPLOYMENT.md 2.4)
-#   OPENAI_API_KEY       only needed once services/extraction.ts calls
-#                        a real vision/OCR provider; the pipeline writes
-#                        it to the VPS on every deploy regardless, so
-#                        rotation only ever needs updating here
+#   OPENAI_API_KEY       required. services/extraction.ts calls a real
+#                        OpenAI vision API, /api/verify and
+#                        /api/verify/batch are silently broken without
+#                        this even though /api/health still passes.
+#                        Checked in the required-secrets step below, the
+#                        deploy fails fast if it's missing rather than
+#                        shipping a backend that can't actually verify
+#                        a label. Written to the VPS on every deploy,
+#                        so rotation only ever needs updating here.
+#
+# Optional repository secrets:
+#   OPENAI_VISION_MODEL  overrides the vision model services/extraction.ts
+#                        calls (defaults to gpt-5.6 if unset, see
+#                        services/extraction.ts). Not required, written
+#                        to the VPS blank if unset, same rotation
+#                        pattern as OPENAI_API_KEY when you do set it.
 #
 # SSH key setup: same as insight-engine-rag, use a dedicated SSH
 # keypair, not the VPS root password. See that repo's deploy.yml for
@@ -112,9 +126,18 @@ jobs:
 
       - name: Backend — install deps
         working-directory: backend
-        # Full install, not --omit=dev: typescript and @types/* are
-        # devDependencies, needed here to type-check.
+        # Full install, not --omit=dev: typescript, @types/*, and the
+        # OpenAPI schema generator (ts-json-schema-generator, ts-node)
+        # are all devDependencies, needed here to type-check.
         run: npm install
+
+      - name: Backend — generate OpenAPI schemas
+        working-directory: backend
+        # swagger-spec.ts imports ./schemas.generated, which doesn't
+        # exist in a fresh checkout, it's a build artifact (see
+        # scripts/generate-openapi-schemas.ts). Without this step, the
+        # next step fails on a missing module, not a real type error.
+        run: npm run generate:schemas
 
       - name: Backend — type check (strict TypeScript)
         working-directory: backend
@@ -154,9 +177,12 @@ jobs:
       # Fails fast, before SSH is even attempted, with a clear message
       # naming exactly which secret is missing. Without this, a missing
       # secret shows up later as an opaque SSH or rsync failure that's
-      # harder to diagnose. OPENAI_API_KEY is intentionally NOT checked
-      # here, it's allowed to be blank until extraction.ts needs it for
-      # real; every other secret is required for the deploy to make sense.
+      # harder to diagnose. OPENAI_API_KEY IS checked here: extraction.ts
+      # is no longer a stub, it makes a real call to OpenAI's vision API,
+      # so a missing key means /api/verify is silently broken in
+      # production even though the health check still passes (health
+      # doesn't touch extraction). Every secret below is required for
+      # the deploy to make sense.
       #
       # Deliberately lives here in `deploy`, not in `verify-build`.
       # verify-build never touches the VPS and is meant to be safe and
@@ -170,6 +196,7 @@ jobs:
           [ -z "${{ secrets.VPS_SSH_KEY }}" ] && missing="$missing VPS_SSH_KEY"
           [ -z "${{ secrets.VPS_PROJECT_PATH }}" ] && missing="$missing VPS_PROJECT_PATH"
           [ -z "${{ secrets.PUBLIC_HEALTH_URL }}" ] && missing="$missing PUBLIC_HEALTH_URL"
+          [ -z "${{ secrets.OPENAI_API_KEY }}" ] && missing="$missing OPENAI_API_KEY"
           if [ -n "$missing" ]; then
             echo "Missing required repository secrets:$missing"
             echo "Set these under Settings -> Secrets and variables -> Actions before deploying."
@@ -230,7 +257,11 @@ jobs:
               echo "      ProxyPassReverse \"/mvps/label-verify/api/\" \"http://127.0.0.1:3002/api/\""
               echo "  </IfModule>"
               echo ""
-              echo "Then: apachectl configtest && systemctl restart httpd"
+              echo "Then: apachectl configtest && /usr/local/cpanel/scripts/restartsrv_httpd --graceful"
+              echo "(NOT systemctl restart httpd, confirmed on this VPS to silently"
+              echo "no-op: apachectl reports the new config valid but real requests"
+              echo "keep 404ing. Use cPanel's own service script, see"
+              echo "ARCHITECTURE_AND_DEPLOYMENT.md 2.4 for the full explanation.)"
               echo ""
               echo "See ARCHITECTURE_AND_DEPLOYMENT.md section 2.4 for the full explanation."
               exit 1
@@ -287,9 +318,12 @@ jobs:
             echo "Source files confirmed present on VPS."
           '
 
-      # Writes backend/.env from the OPENAI_API_KEY GitHub Secret on every
-      # deploy, same rotation approach as insight-engine-rag: rotate the
-      # key once in GitHub Secrets, the next deploy pushes it automatically.
+      # Writes backend/.env from GitHub Secrets on every deploy, same
+      # rotation approach as insight-engine-rag: rotate a value once in
+      # GitHub Secrets, the next deploy pushes it to the VPS
+      # automatically. OPENAI_VISION_MODEL is optional and written as
+      # blank if unset, extraction.ts falls back to its own default in
+      # that case, same as running locally with an unset env var.
       # rsync above deliberately excludes .env so this is the only place
       # that writes it, no risk of the two conflicting.
       - name: Write backend .env from GitHub Secrets
@@ -297,6 +331,7 @@ jobs:
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
             set -eu
             echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" > "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"
+            echo "OPENAI_VISION_MODEL=${{ secrets.OPENAI_VISION_MODEL }}" >> "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"
             echo "PORT=3002" >> "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"
           '
 

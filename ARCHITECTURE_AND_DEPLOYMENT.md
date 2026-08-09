@@ -8,6 +8,15 @@ documentation, not a step-by-step first-deploy walkthrough. If the
 pipeline itself ever needs debugging, this is what it's actually
 doing under the hood.
 
+**A note on scope:** some of what's below (the exact Apache config
+path, the `httpd` vs `apache2` naming, the cPanel-specific restart
+command) is specific to this particular Bluehost VPS, not general
+best practice or something the assessment itself asked for. It's kept
+here in detail because it's genuinely useful for maintaining this
+deployment later, not because it's meant to be evaluated. The
+architecture decisions (why TypeScript, why this service split, why
+this deployment pattern) are the parts actually worth reading closely.
+
 ---
 
 # PART 1: ARCHITECTURE
@@ -77,36 +86,61 @@ TypeScript is the only source, compiled to `dist/` and that compiled
 output is what actually runs, both locally in production mode and in
 the deployed Docker container.
 
-```
-backend/
-  server.ts               Thin router only. Parses each request,
-                            calls a service function, shapes the
-                            response. No business logic lives here.
-  services/
-    extraction.ts          extractLabelFields(imageBuffer) -> fields.
-                            Will call a vision/OCR provider. Pure
-                            function, no Express dependency. Not yet
-                            implemented (throws). Exports the
-                            ExtractedLabelFields interface.
-    matching.ts              matchLabelToApplication(extracted, data)
-                            -> per-field match result. Holds the
-                            canonical Government Warning text (27 CFR
-                            16.21/16.22) and normalize(). Pure
-                            function. Not yet implemented (throws).
-                            Exports ApplicationData, FieldMatchResult,
-                            and MatchResult interfaces.
-    batch.ts                 verifyBatch(items) -> per-item results.
-                            Orchestrates extraction + matching per
-                            item with per-item error isolation.
-  swagger-spec.ts          OpenAPI 3.0 spec, maintained manually as a
-                            static file, documents current AND
-                            planned endpoints.
-  tsconfig.json             strict: true, outDir dist.
-  Dockerfile                node:20-alpine, port 3002. Full `npm install`
-                            (needs devDependencies to compile), then
-                            `npx tsc`, then runs the compiled
-                            `dist/server.js`.
-```
+**Why the backend runs in Docker rather than as a plain Node process
+directly on the VPS:** same reason the frontend build has to run in a
+container too, the VPS host has no working Node install at all,
+confirmed by insight-engine-rag's own deployment notes: a broken,
+extremely outdated Node environment missing required shared libraries
+(e.g. `libbrotlidec.so.1`). Node cannot run natively on this host, so
+the backend genuinely has no alternative to running inside a
+container, it isn't a stylistic choice. `--restart unless-stopped`
+also brings the container back automatically after a VPS reboot,
+which a bare host process wouldn't get without separately setting up
+something like `systemd` or `pm2`.
+
+All backend source lives under `backend/`:
+
+- **`server.ts`** — Thin router only. Parses each request, calls a
+  service function, shapes the response. No business logic lives
+  here.
+
+- **`services/extraction.ts`** — `extractLabelFields(imageBuffer,
+  mimeType) -> fields`. Calls an OpenAI vision model (Chat Completions
+  API, `image_url` content) to extract label fields. Model is
+  env-configurable via `OPENAI_VISION_MODEL`. Pure function, no
+  Express dependency. Exports the `ExtractedLabelFields` interface.
+
+- **`services/matching.ts`** — `matchLabelToApplication(extracted,
+  data) -> per-field match result`. Holds the canonical Government
+  Warning text (27 CFR 16.21/16.22) and `normalize()`. Pure function.
+  Exports `ApplicationData`, `FieldMatchResult`, and `MatchResult`
+  interfaces.
+
+- **`services/batch.ts`** — `verifyBatch(items) -> per-item results`.
+  Orchestrates extraction + matching per item with per-item error
+  isolation.
+
+- **`swagger-spec.ts`** — OpenAPI 3.0 spec. `components.schemas` is
+  generated directly from the actual TS interfaces in `services/`
+  (see `schemas.generated.ts` and `scripts/generate-openapi-schemas.ts`,
+  run via `npm run generate:schemas`), so response shapes can't drift
+  out of sync with the code. `paths` (routes, verbs, request bodies,
+  status codes) is still hand-maintained, Express doesn't carry that
+  metadata anywhere for a generator to read.
+
+- **`scripts/generate-openapi-schemas.ts`** — Generates
+  `schemas.generated.ts` from the exported service interfaces using
+  `ts-json-schema-generator`, then fixes up JSON-Schema-to-OpenAPI-3.0
+  differences (nullable unions, `$ref` paths). Build-time only, never
+  runs against a live request.
+
+- **`tsconfig.json`** — `strict: true`, `outDir dist`.
+
+- **`Dockerfile`** — `node:20-alpine`, port 3002. Full `npm install`
+  (needs devDependencies to compile and to run the schema generator),
+  then `npm run generate:schemas && npx tsc` (order matters,
+  `swagger-spec.ts` imports the generated file), then runs the
+  compiled `dist/server.js`.
 
 **Why services are split from routing:** each service function takes
 plain data in and returns plain data out, with zero dependency on
@@ -117,16 +151,17 @@ later is a thin wrapper around the same function, not a rewrite.
 
 ## 1.3 Frontend architecture
 
-```
-frontend/src/
-  main.jsx     Entry point, mounts App.
-  App.jsx      Owns app state. Currently just the health check
-                result; will become the shared-state owner for the
-                full upload/verify/results flow once built.
-  App.css      Design tokens and base styles, reused directly from
-                insight-engine-rag (--accent, --card, --border,
-                --radius, etc) for visual consistency across MVPs.
-```
+All frontend source lives under `frontend/src/`:
+
+- **`main.jsx`** — Entry point, mounts App.
+
+- **`App.jsx`** — Owns app state. Currently just the health check
+  result; will become the shared-state owner for the full
+  upload/verify/results flow once built.
+
+- **`App.css`** — Design tokens and base styles, reused directly
+  from insight-engine-rag (`--accent`, `--card`, `--border`,
+  `--radius`, etc) for visual consistency across MVPs.
 
 Skeleton only right now, see `frontend/README.md`'s "Planned
 structure" section for where this splits into `components/` and
@@ -215,7 +250,9 @@ connection steps, unchanged here.
 vs `/opt/rag`. Sharing a path would let the two deploys overwrite
 each other.
 
-**Backend:**
+**Backend**, runs as a Docker container rather than a bare Node
+process since the VPS host has no working Node install to run it on
+directly (see 1.2 above for why):
 ```
 cd $PROJECT/backend
 docker build -t ttb-label-verify-backend .
@@ -229,8 +266,10 @@ docker run -d \
 ```
 
 **Frontend**, built inside a throwaway container since the VPS host
-Node install isn't reliable (same constraint insight-engine-rag
-documented):
+has no working Node install at all, confirmed by insight-engine-rag's
+own deployment notes: a broken, extremely outdated Node environment
+missing required shared libraries (e.g. `libbrotlidec.so.1`). Node
+cannot run natively on this host, not just an unreliable version:
 ```
 docker run --rm \
   -v "$PROJECT/frontend:/app" \
@@ -312,13 +351,22 @@ existing `/api/` block, not a separate file:
 ### Apply it
 
 ```
-apachectl configtest
-systemctl restart httpd
+apachectl -t
+/usr/local/cpanel/scripts/restartsrv_httpd --graceful
 ```
 
-Always run `configtest` first, a syntax error here would take down
-Apache for every site on the VPS, including insight-engine-rag, not
-just this app.
+Always run `-t` (syntax check) first, a syntax error here would take
+down Apache for every site on the VPS, including insight-engine-rag,
+not just this app.
+
+Use the cPanel service script, not `systemctl restart httpd`
+directly. Confirmed on this exact VPS: `systemctl restart httpd`
+completed with no error, but Apache continued serving the old config
+regardless, real requests kept 404ing even though `apachectl -t`
+reported the new config as valid. `/usr/local/cpanel/scripts/restartsrv_httpd --graceful`
+is what actually got the new config live. cPanel manages its own
+service state around `httpd`, and that state can drift out of sync
+with what `systemctl` sees, using cPanel's own script avoids that.
 
 ### Verify
 
@@ -345,11 +393,14 @@ reaches the backend only through Apache's reverse proxy.
 
 ## 2.5 Rotating the OpenAI API key
 
-Once `services/extraction.ts` calls a real vision/OCR provider,
-rotate the key by updating the `OPENAI_API_KEY` GitHub repository
-secret only. The next deploy writes it to the VPS automatically,
-same single-touch-point rotation insight-engine-rag uses, no manual
-`.env` editing on the VPS itself required.
+`services/extraction.ts` calls a real OpenAI vision model, so
+`OPENAI_API_KEY` is required, not optional, for `/api/verify` and
+`/api/verify/batch` to work. Rotate the key by updating the
+`OPENAI_API_KEY` GitHub repository secret only. The next deploy
+writes it to the VPS automatically, same single-touch-point rotation
+insight-engine-rag uses, no manual `.env` editing on the VPS itself
+required. `OPENAI_VISION_MODEL` (optional, overrides the default
+vision model) follows the same rotation pattern if set.
 
 ## 2.6 Security notes
 
@@ -359,7 +410,16 @@ same single-touch-point rotation insight-engine-rag uses, no manual
 - CORS is fully open. Fine for a demo, would need restricting before
   production use.
 - Internal port 3002 never exposed publicly, matches insight-engine-rag's
-  pattern exactly.
+  pattern exactly. **Unverified as written**: the actual `docker run`
+  command in 2.3 and in `deploy-to-vps.yml` uses `-p 3002:3002`, which
+  binds all interfaces (`0.0.0.0:3002`), not `127.0.0.1:3002`. `EXPOSE
+  3002` in the Dockerfile is documentation only, it doesn't restrict
+  anything. This claim is only true if something else on the VPS (a
+  firewall, UFW, a cloud security group) separately blocks inbound
+  3002, that hasn't been confirmed. If nothing else blocks it, this
+  port is reachable directly from the internet right now, bypassing
+  Apache entirely, and the fix is `-p 127.0.0.1:3002:3002` in both the
+  command below and `deploy-to-vps.yml`'s `docker run` step.
 - `backend/.env` is written in plaintext on the VPS via `--env-file`,
   same accepted tradeoff insight-engine-rag documents: a secrets
   manager would avoid this but is disproportionate infrastructure for

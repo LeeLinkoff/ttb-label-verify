@@ -11,6 +11,7 @@ import { matchLabelToApplication, ApplicationData, MatchResult } from "./matchin
 
 export interface BatchItem {
   imageBuffer: Buffer;
+  mimeType: string;
   applicationData: ApplicationData;
 }
 
@@ -26,7 +27,10 @@ export async function verifyBatch(items: BatchItem[]): Promise<BatchResultItem[]
 
   for (let i = 0; i < items.length; i++) {
     try {
-      const extracted = await extractLabelFields(items[i].imageBuffer);
+      const extracted = await extractLabelFields(
+        items[i].imageBuffer,
+        items[i].mimeType
+      );
       const result = matchLabelToApplication(extracted, items[i].applicationData);
       results.push({ index: i, ok: true, result });
     } catch (err) {

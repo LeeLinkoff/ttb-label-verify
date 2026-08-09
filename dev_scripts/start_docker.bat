@@ -6,7 +6,7 @@ REM  launches Docker Desktop and waits (up to 2 minutes) for it
 REM  to finish starting before returning control.
 REM
 REM  Call this at the top of any script that needs docker build/run,
-REM  e.g. from run_backend_docker.bat: call start_docker.bat
+REM  e.g. from build_back_docker.bat: call start_docker.bat
 REM ============================================================
 
 echo Checking if Docker is running...

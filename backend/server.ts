@@ -9,8 +9,8 @@
 // Endpoints:
 //   GET  /api/health         — liveness check
 //   GET  /api/docs           — Swagger UI (current + planned endpoints)
-//   POST /api/verify         — single label verification (planned, 501)
-//   POST /api/verify/batch   — batch label verification (planned, 501)
+//   POST /api/verify         — single label verification
+//   POST /api/verify/batch   — batch label verification
 
 import "dotenv/config";
 import express, { Request, Response } from "express";
@@ -49,15 +49,20 @@ app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 /**
  * POST /api/verify
  * multipart/form-data: labelImage + application fields.
- * Not implemented yet, services/extraction.ts and services/matching.ts
- * both throw. Returns 501 until those are built out.
  */
 app.post(
   "/api/verify",
   upload.single("labelImage"),
   async (req: Request, res: Response) => {
     try {
-      const extracted = await extractLabelFields(req.file?.buffer);
+      if (!req.file) {
+        res.status(400).json({ ok: false, error: "labelImage is required" });
+        return;
+      }
+      const extracted = await extractLabelFields(
+        req.file.buffer,
+        req.file.mimetype
+      );
       const result = matchLabelToApplication(
         extracted,
         req.body as ApplicationData
@@ -65,7 +70,7 @@ app.post(
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      res.status(501).json({ ok: false, error: message });
+      res.status(502).json({ ok: false, error: message });
     }
   }
 );
@@ -74,8 +79,6 @@ app.post(
  * POST /api/verify/batch
  * multipart/form-data: multiple labelImages[] + a JSON array of
  * matching application data under `applications`.
- * Not implemented yet, delegates to services/batch.ts which itself
- * calls the same not-yet-implemented extraction/matching functions.
  */
 app.post(
   "/api/verify/batch",
@@ -88,13 +91,14 @@ app.post(
       const files = (req.files as Express.Multer.File[]) || [];
       const items: BatchItem[] = files.map((file, i) => ({
         imageBuffer: file.buffer,
+        mimeType: file.mimetype,
         applicationData: applications[i] || {}
       }));
       const results = await verifyBatch(items);
       res.json({ results });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      res.status(501).json({ ok: false, error: message });
+      res.status(502).json({ ok: false, error: message });
     }
   }
 );
