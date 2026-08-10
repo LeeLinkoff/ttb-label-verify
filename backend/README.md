@@ -20,19 +20,51 @@ against submitted application data. `/api/verify` returns `400` if no
 vision API error, malformed model response), otherwise `200` with a
 `MatchResult`.
 
+Confirmed against the real API, not just implemented: 20 single-verify
+runs and a 50-item real batch run all passed, average latency 2.65s
+(single) / 2.81s (batch, per item), see `REQUIREMENTS_MATCH.md` for
+the full numbers.
+
 ## Structure
+
+```
+backend/
+├── server.ts
+├── swagger-spec.ts
+├── schemas.generated.ts        (generated at build time, gitignored)
+├── tsconfig.json
+├── Dockerfile
+├── .env.example
+├── package.json
+├── package-lock.json
+├── README.md
+├── services/
+│   ├── extraction.ts
+│   ├── matching.ts
+│   └── batch.ts
+└── scripts/
+    └── generate-openapi-schemas.ts
+```
+
+`node_modules/` and `dist/` (build output) are omitted above, both
+gitignored and rebuilt from source, not part of the tracked structure.
 
 - **`server.ts`** — Thin router only: parses requests, calls a
   service, shapes the response. No business logic lives here.
 
 - **`services/extraction.ts`** — `extractLabelFields(imageBuffer,
   mimeType) -> fields`. Calls an OpenAI vision model (Chat Completions
-  API, `image_url` content) to extract label fields. Model is
-  env-configurable via `OPENAI_VISION_MODEL`, currently defaults to
-  `gpt-5.6` (confirmed against OpenAI's own docs at the time this was
-  written; model availability has been churning fast, reconfirm this
-  is still a model your key has access to before relying on the
-  default).
+  API, `image_url` content) to extract label fields. `OPENAI_VISION_MODEL`
+  is required, not optional, no default is hardcoded, the function
+  throws a clear error if it's unset. GPT-5.6 (as of this writing)
+  ships as three priced tiers with real speed differences
+  (`gpt-5.6-sol`/`-terra`/`-luna`), the bare `gpt-5.6` alias silently
+  routes to the slowest, most expensive tier, which is why there's no
+  default baked into source. The OpenAI call has a real 30-second
+  timeout via `AbortController`, a stalled request fails with a clear
+  "timed out" error instead of hanging indefinitely, added after a
+  real incident where a missing timeout made a stalled batch item
+  indistinguishable from a crashed server.
   `mimeType` is required (from Multer's `req.file.mimetype`) to build
   a valid `data:` URL, there's no attempt to guess image format from
   the buffer alone. Pure function, no Express dependency.
@@ -41,18 +73,28 @@ vision API error, malformed model response), otherwise `200` with a
   applicationData) -> per-field match result`. Also holds the
   canonical Government Warning text (27 CFR 16.21/16.22) and
   `normalize()` for tolerant field comparison. brandName, classType,
-  and netContents get normalize()-and-compare (a normalized mismatch
-  is flagged `needsReview`, not auto-rejected). alcoholContent gets a
-  presence/format check only. warningStatement requires exact text
-  match plus two independent formatting conditions per 27 CFR 16.22:
-  "GOVERNMENT WARNING" must be all-caps and bold, and the remainder of
-  the statement must NOT be bold. Pure function. Exports the
-  `ApplicationData`, `FieldMatchResult`, and `MatchResult` interfaces
-  used elsewhere.
+  netContents, producerName, and producerAddress get
+  normalize()-and-compare (a normalized mismatch is flagged
+  `needsReview`, not auto-rejected). countryOfOrigin gets the same
+  treatment but only when the application declares one (imports
+  only), skipped entirely for domestic products. alcoholContent gets
+  a real numeric comparison, both sides parsed to a percentage and
+  compared with a 0.1-point tolerance for formatting/rounding noise,
+  not a presence-only check, an earlier version only checked format
+  and would have let a genuinely wrong ABV pass. warningStatement
+  requires exact text match plus two independent formatting
+  conditions per 27 CFR 16.22: "GOVERNMENT WARNING" must be all-caps
+  and bold, and the remainder of the statement must NOT be bold. Pure
+  function. Exports the `ApplicationData`, `FieldMatchResult`, and
+  `MatchResult` interfaces used elsewhere.
 
 - **`services/batch.ts`** — `verifyBatch(items) -> per-item results`.
   Orchestrates extraction + matching per item with per-item error
-  isolation, no logic of its own.
+  isolation. Logs per-item start/success/failure with elapsed time to
+  the console, added after a real batch request failed with zero
+  server-side output, impossible to tell whether the backend had
+  crashed, hung, or was working fine, all three looked identical
+  without it.
 
 - **`swagger-spec.ts`** — OpenAPI 3.0 spec. `components.schemas` is
   generated directly from the actual TS interfaces in `services/` (see
@@ -138,14 +180,6 @@ actually uses (see `swagger-spec.ts` and `schemas.generated.ts` above).
 
 `.github/workflows/code-checks.yml` runs on every push and pull
 request to `main` (also runnable by hand via `workflow_dispatch`).
-This describes the fixed version delivered alongside this README
-update, not the file as it existed before this pass: the original
-had `type-check` running `npx tsc --noEmit` with no step generating
-`schemas.generated.ts` first, which `swagger-spec.ts` imports and
-which doesn't exist in a fresh checkout. That would have failed CI
-outright on the next push, not a docs mismatch, an actual break. Both
-`type-check` and `boot-test` now run `npm run generate:schemas` before
-compiling.
 
 Three jobs: `frontend-build` (independent, runs in parallel, confirms
 `dist/index.html` exists after a real production build), `type-check`
@@ -158,11 +192,14 @@ request with no image).
 
 That last check only exercises the missing-`labelImage` validation
 path in `server.ts`, it does not send a real label through the OpenAI
-vision call, so no `OPENAI_API_KEY` secret is needed for CI to pass
-today. There's still no eval harness that runs a real label image
-through `/api/verify` end to end and checks the match results, adding
-one (gated on an `OPENAI_API_KEY` secret) is the natural next step,
-the workflow's own comments note this. Run it locally before pushing
+vision call in CI, so no `OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secret
+is needed for CI to pass. Real end-to-end verification against a live
+label does exist, but as local PowerShell tooling
+(`dev_scripts\debug_verify.ps1`, `benchmark_verify.ps1`,
+`test_batch_verify.ps1`, `test_batch_volume.ps1`), not as a CI job.
+Folding an equivalent check into `code-checks.yml` itself (gated on
+`OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secrets) is the natural next
+step, not yet done. Run the existing CI checks locally before pushing
 with `..\dev_scripts\test_code_checks_yml.bat` (via `act`).
 
 ## Running
@@ -208,16 +245,23 @@ backend can actually run on that host at all.
 
 ```
 docker build -t ttb-label-verify-backend .
-docker run -d --name ttb-label-verify-backend --restart unless-stopped -p 3002:3002 --env-file .env ttb-label-verify-backend
+docker run -d --name ttb-label-verify-backend --restart unless-stopped -p 127.0.0.1:3002:3002 --env-file .env ttb-label-verify-backend
 ```
 
-Or `..\dev_scripts\build_back.bat` on Windows. The Dockerfile
-regenerates `schemas.generated.ts` from the service interfaces, then
-compiles TypeScript to `dist/` during the image build, then runs
-`node dist/server.js`, it never runs `.ts` source directly in the
-container. `.env` needs `OPENAI_API_KEY` (and optionally
-`OPENAI_VISION_MODEL`) for `--env-file .env` to actually work at
-runtime, see Environment variables below.
+Binds only to localhost (`127.0.0.1:3002:3002`), not all interfaces,
+an earlier version of this command used `-p 3002:3002`, which bound
+`0.0.0.0:3002` and left the backend reachable directly from the
+internet, bypassing Apache entirely. Fixed, confirmed in both this
+command and `deploy-to-vps.yml`'s equivalent step.
+
+Or `..\dev_scripts\build_back_local.bat` (compiles without Docker) or
+`..\dev_scripts\build_back_docker.bat` (builds the actual image) on
+Windows. The Dockerfile regenerates `schemas.generated.ts` from the
+service interfaces, then compiles TypeScript to `dist/` during the
+image build, then runs `node dist/server.js`, it never runs `.ts`
+source directly in the container. `.env` needs both `OPENAI_API_KEY`
+and `OPENAI_VISION_MODEL` for `--env-file .env` to actually work at
+runtime, neither is optional, see Environment variables below.
 
 ## Environment variables
 
@@ -228,10 +272,14 @@ OPENAI_API_KEY=
 OPENAI_VISION_MODEL=
 ```
 
-`OPENAI_API_KEY` is required, `/api/verify` and `/api/verify/batch`
-fail extraction without it. `OPENAI_VISION_MODEL` is optional,
-overrides the default vision model (`gpt-5.6`, see
-`services/extraction.ts` above), leave blank to use the default.
+Both `OPENAI_API_KEY` and `OPENAI_VISION_MODEL` are required, `/api/verify`
+and `/api/verify/batch` fail extraction without either one, no default
+model is hardcoded in source. GPT-5.6 (as of this writing) ships as
+three priced tiers with real speed differences, `gpt-5.6-sol`
+(flagship, slowest, $5/$30 per 1M tokens), `gpt-5.6-terra` (balanced,
+$2.50/$15), `gpt-5.6-luna` (fastest/cheapest, $1/$6). Confirm current
+model names/pricing against OpenAI's docs before setting this, model
+lineups change.
 
 ## Known limitations
 
@@ -239,11 +287,17 @@ overrides the default vision model (`gpt-5.6`, see
 - No auth or rate limiting, consistent with the assumption in
   `DESIGN_CONSIDERATIONS.md` that this is acceptable for a prototype
   handling no sensitive data.
-- Per-label response time hasn't been measured against the ~5 second
-  target from the assessment outline. Depends entirely on OpenAI's
-  vision inference latency, not on anything in this codebase or on
-  Docker/VPS overhead. Worth timing with a real key before assuming
-  it clears the bar; if it doesn't, `OPENAI_VISION_MODEL` is there to
-  swap in something faster.
 - CORS is fully open, fine for a demo, would need restricting before
   any real deployment.
+- Batch processing is strictly sequential, one item at a time, no
+  concurrency. Confirmed working at 50 real items (50/50 succeeded,
+  2.81s/item average); the full 200-300 volume mentioned in the
+  assessment interviews was not run, real OpenAI API cost on an
+  unpaid assessment, not a technical limitation, see
+  `REQUIREMENTS_MATCH.md` for the honest extrapolation from the real
+  50-item number.
+- This app depends on direct outbound access to `api.openai.com`.
+  If deployed inside a network with outbound restrictions (the
+  assessment interviews mention this happened to a prior vendor
+  pilot), this would need to be confirmed reachable first, or routed
+  through something like Azure OpenAI Service instead.

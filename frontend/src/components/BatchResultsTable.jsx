@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { CheckCircle2, XCircle, ChevronDown, ChevronRight } from 'lucide-react'
+import { CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
 import MatchResultCard from './MatchResultCard'
 import ErrorMessage from './ErrorMessage'
 
@@ -34,10 +34,12 @@ function BatchResultsTable({ results, fileNames }) {
                 </td>
                 <td>{fileNames[item.index] || `Item ${item.index + 1}`}</td>
                 <td>
-                  {item.result?.overallMatch ? (
+                  {!item.ok ? (
+                    <XCircle size={16} className="status-icon error" />
+                  ) : item.result?.overallMatch ? (
                     <CheckCircle2 size={16} className="status-icon ok" />
                   ) : (
-                    <XCircle size={16} className="status-icon error" />
+                    <AlertTriangle size={16} className="status-icon review" />
                   )}
                 </td>
                 <td>

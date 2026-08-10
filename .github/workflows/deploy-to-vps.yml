@@ -97,12 +97,11 @@ name: Deploy to VPS
 #                        a label. Written to the VPS on every deploy,
 #                        so rotation only ever needs updating here.
 #
-# Optional repository secrets:
-#   OPENAI_VISION_MODEL  overrides the vision model services/extraction.ts
-#                        calls (defaults to gpt-5.6 if unset, see
-#                        services/extraction.ts). Not required, written
-#                        to the VPS blank if unset, same rotation
-#                        pattern as OPENAI_API_KEY when you do set it.
+#   OPENAI_VISION_MODEL  required. services/extraction.ts deliberately has
+#                        no hardcoded/default vision model and throws if
+#                        this environment variable is missing or empty.
+#                        Written to the VPS on every deploy alongside
+#                        OPENAI_API_KEY.
 #
 # SSH key setup: same as insight-engine-rag, use a dedicated SSH
 # keypair, not the VPS root password. See that repo's deploy.yml for
@@ -197,6 +196,7 @@ jobs:
           [ -z "${{ secrets.VPS_PROJECT_PATH }}" ] && missing="$missing VPS_PROJECT_PATH"
           [ -z "${{ secrets.PUBLIC_HEALTH_URL }}" ] && missing="$missing PUBLIC_HEALTH_URL"
           [ -z "${{ secrets.OPENAI_API_KEY }}" ] && missing="$missing OPENAI_API_KEY"
+          [ -z "${{ secrets.OPENAI_VISION_MODEL }}" ] && missing="$missing OPENAI_VISION_MODEL"
           if [ -n "$missing" ]; then
             echo "Missing required repository secrets:$missing"
             echo "Set these under Settings -> Secrets and variables -> Actions before deploying."
@@ -321,9 +321,10 @@ jobs:
       # Writes backend/.env from GitHub Secrets on every deploy, same
       # rotation approach as insight-engine-rag: rotate a value once in
       # GitHub Secrets, the next deploy pushes it to the VPS
-      # automatically. OPENAI_VISION_MODEL is optional and written as
-      # blank if unset, extraction.ts falls back to its own default in
-      # that case, same as running locally with an unset env var.
+      # automatically. OPENAI_VISION_MODEL is required just like
+      # OPENAI_API_KEY; extraction.ts has no fallback and throws if it
+      # is missing or empty. The required-secrets gate above prevents
+      # deployment before this file can be written with a blank value.
       # rsync above deliberately excludes .env so this is the only place
       # that writes it, no risk of the two conflicting.
       - name: Write backend .env from GitHub Secrets
@@ -343,11 +344,19 @@ jobs:
               echo "ERROR: backend/.env was not created on the VPS."
               exit 1
             fi
+            if ! grep -q "^OPENAI_API_KEY=..*" "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"; then
+              echo "ERROR: backend/.env has a missing or empty OPENAI_API_KEY."
+              exit 1
+            fi
+            if ! grep -q "^OPENAI_VISION_MODEL=..*" "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"; then
+              echo "ERROR: backend/.env has a missing or empty OPENAI_VISION_MODEL."
+              exit 1
+            fi
             if ! grep -q "^PORT=" "${{ secrets.VPS_PROJECT_PATH }}/backend/.env"; then
               echo "ERROR: backend/.env exists but has no PORT= line."
               exit 1
             fi
-            echo "backend/.env confirmed present with a PORT line."
+            echo "backend/.env confirmed with required OpenAI settings and PORT."
           '
 
       - name: Rebuild and restart backend container
@@ -360,7 +369,7 @@ jobs:
             docker run -d \
               --name ttb-label-verify-backend \
               --restart unless-stopped \
-              -p 3002:3002 \
+              -p 127.0.0.1:3002:3002 \
               --env-file .env \
               ttb-label-verify-backend
           '

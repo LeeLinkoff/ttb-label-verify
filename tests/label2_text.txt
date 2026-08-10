@@ -1,4 +1,18 @@
-brandName:      SILVER CREEK DISTILLERY
-classType:      Vodka
-alcoholContent: 40% Alc./Vol. (80 Proof)
-netContents:    750 mL
+brandName:       HIGHLAND MIST DISTILLERS
+classType:       Blended Scotch Whisky
+alcoholContent:  43% Alc./Vol. (86 Proof)
+netContents:     750 mL
+producerName:    Highland Mist Distillers Ltd.
+producerAddress: Speyside, Scotland
+countryOfOrigin: Product of Scotland
+
+Every field above is expected to MATCH (this is an import, so
+countryOfOrigin is actually exercised here, unlike label1).
+
+The warning statement is the ONE deliberate violation on this label:
+printed as "Government warning:" in mixed case and not bold, instead
+of "GOVERNMENT WARNING:" all-caps and bold. Expect
+fields.warningStatement.match: false and needsReview: true, with
+every other field matching, so overallMatch is still false overall,
+but the failure is isolated to warningStatement specifically, not a
+blanket mismatch across every field.

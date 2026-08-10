@@ -9,7 +9,10 @@ const EMPTY_APPLICATION = {
   brandName: '',
   classType: '',
   alcoholContent: '',
-  netContents: ''
+  netContents: '',
+  producerName: '',
+  producerAddress: '',
+  countryOfOrigin: ''
 }
 
 function SingleVerifyPanel() {

@@ -62,6 +62,15 @@ export const generatedSchemas: Record<string, unknown> = {
       },
       "netContents": {
         "type": "string"
+      },
+      "producerName": {
+        "type": "string"
+      },
+      "producerAddress": {
+        "type": "string"
+      },
+      "countryOfOrigin": {
+        "type": "string"
       }
     },
     "additionalProperties": {}
@@ -107,6 +116,18 @@ export const generatedSchemas: Record<string, unknown> = {
         "type": "string",
         "nullable": true
       },
+      "producerName": {
+        "type": "string",
+        "nullable": true
+      },
+      "producerAddress": {
+        "type": "string",
+        "nullable": true
+      },
+      "countryOfOrigin": {
+        "type": "string",
+        "nullable": true
+      },
       "warningStatement": {
         "type": "string",
         "nullable": true
@@ -134,6 +155,9 @@ export const generatedSchemas: Record<string, unknown> = {
       "classType",
       "alcoholContent",
       "netContents",
+      "producerName",
+      "producerAddress",
+      "countryOfOrigin",
       "warningStatement",
       "warningStatementFormatted"
     ],

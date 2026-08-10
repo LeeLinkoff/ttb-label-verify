@@ -1,4 +1,13 @@
-brandName:      OLD TOM DISTILLERY
-classType:      Kentucky Straight Bourbon Whiskey
-alcoholContent: 45% Alc./Vol. (90 Proof)
-netContents:    750 mL
+brandName:       PALE HORSE DISTILLERY
+classType:       Kentucky Straight Bourbon Whiskey
+alcoholContent:  45% Alc./Vol. (90 Proof)
+netContents:     750 mL
+producerName:    Pale Horse Distillery Co.
+producerAddress: Bardstown, KY
+countryOfOrigin: (leave blank, domestic product, not printed on this label)
+
+Every field above is expected to MATCH, this is the fully compliant
+label. countryOfOrigin is intentionally not exercised here since
+this is a domestic product, it's tested on label2 instead (an
+import), matching.ts's own conditional logic: countryOfOrigin is
+only checked at all when the application declares one.

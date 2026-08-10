@@ -187,6 +187,7 @@ jobs:
               echo "Server is up"
               exit 0
             fi
+            echo "Attempt $i/20: not healthy yet."
             sleep 1
           done
           echo "Server did not become healthy in time"

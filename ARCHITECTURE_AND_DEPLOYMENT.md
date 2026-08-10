@@ -151,22 +151,63 @@ later is a thin wrapper around the same function, not a rewrite.
 
 ## 1.3 Frontend architecture
 
-All frontend source lives under `frontend/src/`:
+Correction: an earlier version of this section described the
+frontend as "skeleton only," a health check panel with no
+upload/verify UI built yet. That's no longer accurate and has been
+rewritten here. All frontend source lives under `frontend/src/`:
 
 - **`main.jsx`** — Entry point, mounts App.
 
-- **`App.jsx`** — Owns app state. Currently just the health check
-  result; will become the shared-state owner for the full
-  upload/verify/results flow once built.
+- **`App.jsx`** — Owns top-level state: the health check result and
+  the active tab (`'single'` or `'batch'`). Renders `StatusCard`,
+  `Tabs`, and whichever verify panel is active. The original API
+  Docs card and "Next Up" placeholder were removed once the real UI
+  was built.
 
-- **`App.css`** — Design tokens and base styles, reused directly
-  from insight-engine-rag (`--accent`, `--card`, `--border`,
-  `--radius`, etc) for visual consistency across MVPs.
+- **`App.css`** — Design tokens and base styles, originally reused
+  directly from insight-engine-rag (`--accent`, `--card`, `--border`,
+  `--radius`, etc), extended with styles for tabs, the image
+  dropzone/file list, the application data form grid, the match
+  result banner/table, and the batch results table as those
+  components were built.
 
-Skeleton only right now, see `frontend/README.md`'s "Planned
-structure" section for where this splits into `components/` and
-`api/` once the upload/verify UI is built, mirroring
-insight-engine-rag's separation of networking from presentation.
+- **`api/client.js`** — Every backend `fetch` call in one place,
+  not scattered across components: `checkHealth()`, `verifyLabel(file,
+  applicationData)` (`POST /api/verify`), `verifyBatch(items)` (`POST
+  /api/verify/batch`). Errors are read from the response body, not
+  just the status code, so callers get a real message to show.
+
+- **`components/`**:
+  - `StatusCard.jsx` — backend status as a check/x/spinner icon,
+    with a "Technical Details" toggle showing the raw health JSON or
+    error instead of always displaying it.
+  - `ErrorMessage.jsx` — generic reusable error display, a
+    plain-language message with a "Details" toggle revealing the
+    real error. Used by both verify panels and by
+    `BatchResultsTable`'s per-item failure rows.
+  - `Tabs.jsx` — minimal tab switcher between Single Label and
+    Batch.
+  - `ImageDropzone.jsx` — file picker for label images, single or
+    multiple, controlled by the parent, shows a removable file list.
+  - `ApplicationDataForm.jsx` — controlled form for the
+    `ApplicationData` fields (brand name, class/type, alcohol
+    content, net contents, producer name, producer address, country
+    of origin), matching `services/matching.ts`'s shape exactly.
+  - `MatchResultCard.jsx` — renders a single `MatchResult`: overall
+    green/yellow/red banner plus a per-field extracted-vs-applied
+    table.
+  - `BatchResultsTable.jsx` — renders the `results` array from
+    `/api/verify/batch`, click a row to expand full match detail or
+    the error.
+  - `SingleVerifyPanel.jsx` / `BatchVerifyPanel.jsx` — orchestrate
+    each tab: upload, form, submit, result/error display.
+
+**Note on `frontend/README.md`**: this file previously pointed to
+that README's "Planned structure" section for where `components/`
+and `api/` would eventually go. That section describes a plan, not
+what's built now, and wasn't re-verified as part of this pass, it
+may still describe the old skeleton state and need its own update
+pass, not confirmed accurate as of this writing.
 
 ## 1.4 Why reuse an existing app as the starting point
 
@@ -272,7 +313,7 @@ docker rm -f ttb-label-verify-backend || true
 docker run -d \
   --name ttb-label-verify-backend \
   --restart unless-stopped \
-  -p 3002:3002 \
+  -p 127.0.0.1:3002:3002 \
   --env-file .env \
   ttb-label-verify-backend
 ```
@@ -411,8 +452,14 @@ reaches the backend only through Apache's reverse proxy.
 `OPENAI_API_KEY` GitHub repository secret only. The next deploy
 writes it to the VPS automatically, same single-touch-point rotation
 insight-engine-rag uses, no manual `.env` editing on the VPS itself
-required. `OPENAI_VISION_MODEL` (optional, overrides the default
-vision model) follows the same rotation pattern if set.
+required. `OPENAI_VISION_MODEL` is required as well, not optional,
+no default is hardcoded in `extraction.ts`, it throws a clear error
+if unset. `deploy-to-vps.yml` checks it's present as a required
+secret before deploying, writes it into `backend/.env` alongside
+`OPENAI_API_KEY`, and confirms it landed on the VPS with a real
+value, all three steps confirmed directly in the workflow file
+itself, not assumed. Same rotation pattern as `OPENAI_API_KEY`:
+update the GitHub secret, the next deploy picks it up automatically.
 
 ## 2.6 Security notes
 
@@ -422,16 +469,14 @@ vision model) follows the same rotation pattern if set.
 - CORS is fully open. Fine for a demo, would need restricting before
   production use.
 - Internal port 3002 never exposed publicly, matches insight-engine-rag's
-  pattern exactly. **Unverified as written**: the actual `docker run`
-  command in 2.3 and in `deploy-to-vps.yml` uses `-p 3002:3002`, which
-  binds all interfaces (`0.0.0.0:3002`), not `127.0.0.1:3002`. `EXPOSE
-  3002` in the Dockerfile is documentation only, it doesn't restrict
-  anything. This claim is only true if something else on the VPS (a
-  firewall, UFW, a cloud security group) separately blocks inbound
-  3002, that hasn't been confirmed. If nothing else blocks it, this
-  port is reachable directly from the internet right now, bypassing
-  Apache entirely, and the fix is `-p 127.0.0.1:3002:3002` in both the
-  command below and `deploy-to-vps.yml`'s `docker run` step.
+  pattern exactly. **Confirmed fixed**: `docker run` in both 2.3 above
+  and `deploy-to-vps.yml`'s equivalent step now use
+  `-p 127.0.0.1:3002:3002`, binding only to localhost, not all
+  interfaces. This was previously `-p 3002:3002` (binds
+  `0.0.0.0:3002`), an earlier version of this note flagged that as an
+  unverified, potentially-open port; that's fixed now, not just
+  documented as a risk. `EXPOSE 3002` in the Dockerfile remains
+  documentation only, it never restricted anything either way.
 - `backend/.env` is written in plaintext on the VPS via `--env-file`,
   same accepted tradeoff insight-engine-rag documents: a secrets
   manager would avoid this but is disproportionate infrastructure for

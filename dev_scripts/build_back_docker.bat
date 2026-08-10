@@ -30,9 +30,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-docker info >nul 2>nul
+REM Launches Docker Desktop and waits up to two minutes for the daemon
+REM to come up if it isn't already running. This step was dropped when
+REM the original build_back.bat was split into build_back_local.bat
+REM and build_back_docker.bat, restored here, this script should
+REM auto-start Docker the same way the old combined script did.
+call "%SCRIPT_DIR%start_docker.bat"
 if errorlevel 1 (
-    echo ERROR: Docker daemon not reachable. Is Docker Desktop running?
+    echo.
+    echo Docker did not start successfully, aborting.
+    pause
     exit /b 1
 )
 

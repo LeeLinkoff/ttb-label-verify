@@ -80,8 +80,8 @@ echo ============================================================
 echo VPS_HOST, VPS_USER, VPS_PROJECT_PATH, and PUBLIC_HEALTH_URL use
 echo this project's known values by default, none of these are
 echo secrets, just config. Press Enter to accept the default shown,
-echo or type a different value to override it. OPENAI_API_KEY is
-echo optional, leave blank to skip.
+echo or type a different value to override it. OPENAI_API_KEY and
+echo OPENAI_VISION_MODEL are both required and cannot be left blank.
 echo.
 
 set "VPS_HOST=leelinkoff.com"
@@ -108,11 +108,35 @@ set "PUBLIC_HEALTH_URL=https://leelinkoff.com/mvps/label-verify/api/health"
 set /p PUBLIC_HEALTH_URL=PUBLIC_HEALTH_URL [%PUBLIC_HEALTH_URL%]: 
 gh secret set PUBLIC_HEALTH_URL --repo %REPO% --body "%PUBLIC_HEALTH_URL%"
 
+:prompt_openai
 set "OPENAI_API_KEY="
-set /p OPENAI_API_KEY=OPENAI_API_KEY (optional for now, blank to skip): 
-if "%OPENAI_API_KEY%"=="" goto skip_openai
+set /p OPENAI_API_KEY=OPENAI_API_KEY (required): 
+if "%OPENAI_API_KEY%"=="" goto openai_required
 gh secret set OPENAI_API_KEY --repo %REPO% --body "%OPENAI_API_KEY%"
-:skip_openai
+goto openai_done
+
+:openai_required
+echo ERROR: OPENAI_API_KEY is required and cannot be blank.
+goto prompt_openai
+
+:openai_done
+
+:prompt_vision_model
+set "OPENAI_VISION_MODEL="
+set /p OPENAI_VISION_MODEL=OPENAI_VISION_MODEL (required, e.g. gpt-5.6-terra): 
+if "%OPENAI_VISION_MODEL%"=="" goto vision_model_required
+gh secret set OPENAI_VISION_MODEL --repo %REPO% --body "%OPENAI_VISION_MODEL%"
+goto vision_model_done
+
+:vision_model_required
+echo ERROR: OPENAI_VISION_MODEL is required and cannot be blank.
+echo extraction.ts has no hardcoded default, deploy-to-vps.yml
+echo requires this secret and fails the deploy immediately without
+echo it. Confirm current model names against OpenAI's docs first if
+echo unsure, model lineups change.
+goto prompt_vision_model
+
+:vision_model_done
 
 echo.
 echo ============================================================

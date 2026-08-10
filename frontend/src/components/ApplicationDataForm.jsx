@@ -4,7 +4,10 @@ const FIELDS = [
   { key: 'brandName', label: 'Brand Name' },
   { key: 'classType', label: 'Class / Type' },
   { key: 'alcoholContent', label: 'Alcohol Content' },
-  { key: 'netContents', label: 'Net Contents' }
+  { key: 'netContents', label: 'Net Contents' },
+  { key: 'producerName', label: 'Producer / Bottler Name' },
+  { key: 'producerAddress', label: 'Producer / Bottler Address' },
+  { key: 'countryOfOrigin', label: 'Country of Origin (imports only)' }
 ]
 
 // Controlled form for the four application fields a label gets

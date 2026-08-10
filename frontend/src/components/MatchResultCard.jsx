@@ -6,6 +6,9 @@ const FIELD_LABELS = {
   classType: 'Class / Type',
   alcoholContent: 'Alcohol Content',
   netContents: 'Net Contents',
+  producerName: 'Producer / Bottler Name',
+  producerAddress: 'Producer / Bottler Address',
+  countryOfOrigin: 'Country of Origin',
   warningStatement: 'Government Warning'
 }
 

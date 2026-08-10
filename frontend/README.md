@@ -1,96 +1,242 @@
-# TTB Label Verification — Frontend
+# TTB Label Verification — Backend
 
-React + Vite. See Structure below for the full component layout,
-current and planned, and Status for what's actually running right
-now.
+Node.js + Express API, written in TypeScript. Thin routing layer over
+a set of plain-function services, structured so any given service can
+become a Lambda handler later without touching the underlying logic.
+
+Written in TypeScript rather than plain JavaScript, unlike
+insight-engine-rag's own backend, which keeps parallel `.ts` files as
+a type-checking aid but still deploys the plain-JS originals. Here,
+TypeScript is the only source and the compiled output is what
+actually runs, both locally and in the deployed Docker container.
 
 ## Status
 
-Skeleton. `App.jsx` pings `/mvps/label-verify/api/health` on load
-(built from `BASE_URL`, not hardcoded), shows live/error status, and
-links to `/mvps/label-verify/api/docs`. No label upload or results UI
-yet.
+`/api/health`, `/api/docs`, `/api/verify`, and `/api/verify/batch` are
+all implemented. `services/extraction.ts` calls an OpenAI vision model
+to extract label fields; `services/matching.ts` compares those fields
+against submitted application data. `/api/verify` returns `400` if no
+`labelImage` is provided, `502` if extraction or matching fails (e.g.
+vision API error, malformed model response), otherwise `200` with a
+`MatchResult`.
+
+Confirmed against the real API, not just implemented: 20 single-verify
+runs and a 50-item real batch run all passed, average latency 2.65s
+(single) / 2.81s (batch, per item), see `REQUIREMENTS_MATCH.md` for
+the full numbers.
 
 ## Structure
 
-All frontend source lives under `src/`:
+```
+backend/
+├── server.ts
+├── swagger-spec.ts
+├── schemas.generated.ts        (generated at build time, gitignored)
+├── tsconfig.json
+├── Dockerfile
+├── .env.example
+├── package.json
+├── package-lock.json
+├── README.md
+├── services/
+│   ├── extraction.ts
+│   ├── matching.ts
+│   └── batch.ts
+└── scripts/
+    └── generate-openapi-schemas.ts
+```
 
-- **`main.jsx`** — Entry point, mounts App.
+`node_modules/` and `dist/` (build output) are omitted above, both
+gitignored and rebuilt from source, not part of the tracked structure.
 
-- **`App.jsx`** — Shared-state owner for the full upload/verify/results
-  flow, same pattern as insight-engine-rag's `App.jsx`.
+| File | What it does |
+|---|---|
+| `server.ts` | Thin router only: parses requests, calls a service, shapes the response. No business logic lives here. |
+| `services/extraction.ts` | `extractLabelFields(imageBuffer, mimeType) -> fields`. Calls an OpenAI vision model (Chat Completions API, `image_url` content). `OPENAI_VISION_MODEL` is required, no hardcoded default, GPT-5.6 ships as three priced tiers (`sol`/`terra`/`luna`) and the bare alias silently routes to the slowest/most expensive one. The OpenAI call has a real 30-second timeout via `AbortController`, a stalled request fails clearly instead of hanging forever, added after a real incident where a missing timeout made a stalled batch item indistinguishable from a crashed server. `mimeType` is required (from Multer) to build a valid `data:` URL. Pure function, no Express dependency. |
+| `services/matching.ts` | `matchLabelToApplication(extracted, applicationData) -> per-field match result`. Holds the canonical Government Warning text (27 CFR 16.21/16.22) and `normalize()` for tolerant comparison. brandName, classType, netContents, producerName, producerAddress: normalize()-and-compare, a mismatch is flagged `needsReview`, not auto-rejected. countryOfOrigin: same, but only when the application declares one (imports only). alcoholContent: real numeric comparison with a 0.1-point tolerance, not presence-only, an earlier version would have let a genuinely wrong ABV pass. warningStatement: exact text match plus two independent formatting conditions per 27 CFR 16.22. Pure function, exports `ApplicationData`, `FieldMatchResult`, `MatchResult`. |
+| `services/batch.ts` | `verifyBatch(items) -> per-item results`. Orchestrates extraction + matching per item with per-item error isolation. Logs per-item start/success/failure with elapsed time to the console, added after a real batch request failed with zero server-side output, impossible to tell whether the backend had crashed, hung, or was working fine. |
+| `swagger-spec.ts` | OpenAPI 3.0 spec. `components.schemas` generated directly from the real TS interfaces (see `schemas.generated.ts`), so response shapes can't drift out of sync with the code. `paths` is hand-written, Express doesn't carry that metadata anywhere for a generator to read. |
+| `scripts/generate-openapi-schemas.ts` | Generates `schemas.generated.ts` from `ExtractedLabelFields`, `ApplicationData`, `FieldMatchResult`, `MatchResult`, `BatchResultItem` using `ts-json-schema-generator`, then fixes up a few JSON-Schema-to-OpenAPI-3.0 differences. Run via `npm run generate:schemas`, also runs automatically in the Docker build. `schemas.generated.ts` is a build artifact, not something to hand-edit. |
+| `tsconfig.json` | `strict: true`, `outDir dist`, compiles `server.ts` + `swagger-spec.ts` + `services/**/*.ts`. |
+| `Dockerfile` | `node:20-alpine`, port 3002. Full `npm install` (needs devDependencies to compile and run the schema generator), then `npm run generate:schemas && npx tsc`, then runs the compiled `dist/server.js`. |
 
-- **`App.css`** — Design tokens and base styles, reused directly
-  from insight-engine-rag for visual consistency across MVPs (same
-  `--accent`, `--card`, `--border`, `--radius`, etc).
+## Dockerfile, image, container: what's actually a file
 
-- **`api/client.js`** — All backend communication (verify, batch,
-  health). Builds every request path from
-  `import.meta.env.BASE_URL`, the `API_BASE` pattern established in
-  `App.jsx`, not hardcoded `/api/...` paths. That pattern exists
-  specifically because this app is deployed under
-  `/mvps/label-verify/`, not the domain root, alongside
-  insight-engine-rag at `/mvps/rag/` on the same VPS, a hardcoded
-  `/api/...` path would silently break in production the same way a
-  bug was already caught and fixed once in this project. Centralizing
-  requests here instead of scattering `fetch()` calls across
-  components is what makes that pattern enforceable in one place
-  rather than something every new component has to remember.
+`Dockerfile` (this file, right here in this folder) is the only real,
+plain text file in this whole chain, everything downstream of it is a
+Docker-internal object, not something you'd browse to on disk:
 
-- **`components/LabelUploadCard.jsx`** — Label image upload UI.
+```
+Dockerfile (real file)
+    |  read by `docker build`
+    v
+Docker image "ttb-label-verify-backend" (Docker's internal storage, not a file)
+    |  instantiated by `docker run`
+    v
+Docker container "ttb-label-verify-backend" (the actual running process)
+```
 
-- **`components/ApplicationDataForm.jsx`** — Form for the
-  application data fields (brand name, class/type, alcohol content,
-  net contents) a label gets matched against.
+The image is a static, inert template, built once per `docker build`.
+The container is a live instance created *from* that image, and it's
+the container, not the image, that's actually running and listening
+on port 3002. They happen to share the same name string here by
+convention (`-t ttb-label-verify-backend` on build, `--name ttb-label-verify-backend`
+on run), but they're genuinely different Docker objects, list images
+with `docker images`, list running containers with `docker ps`.
 
-- **`components/MatchResultCard.jsx`** — Displays a single
-  verification result: per-field match status, any fields flagged
-  for human review.
+On the VPS, this Dockerfile lives at
+`/opt/label-verify/backend/Dockerfile` after `deploy-to-vps.yml`
+syncs it there, unchanged and unconsumed, `docker build` just
+re-reads it fresh on every deploy.
 
-- **`components/BatchResultsTable.jsx`** — Displays results for a
-  batch upload, one row per label.
+## Why services are split out
 
-## Why the theme is reused, not new
+Each service function takes plain data in and returns plain data out,
+with no dependency on `req`/`res`. That's the part of this codebase
+most likely to move to AWS/Azure (Lambda, Step Functions) if this
+prototype informs a real procurement decision. Keeping business logic
+decoupled from Express now means that move is a thin wrapper around
+an existing function later, not a rewrite. TypeScript's interfaces
+(`ExtractedLabelFields`, `ApplicationData`, `MatchResult`, `BatchItem`)
+make that boundary explicit and checked at compile time, not just
+documented in a comment. See `DESIGN_CONSIDERATIONS.md` for the full
+reasoning.
 
-Color tokens, card/button/input styling, and the light-only color
-scheme are copied from insight-engine-rag's `App.css` rather than
-designed fresh. See the top-level `README.md`'s "Why reuse, not
-reinvent" section for the reasoning.
+## Endpoints
 
-## Dev server
+| Method | Path | Status |
+|---|---|---|
+| GET | `/api/health` | Live |
+| GET | `/api/docs` | Live (Swagger UI) |
+| POST | `/api/verify` | Live. `200` on success, `400` if `labelImage` missing, `502` on extraction/matching failure |
+| POST | `/api/verify/batch` | Live. `200` with per-item results (each item independently `ok`/failed), `502` on batch-level failure (e.g. malformed `applications` JSON) |
+
+Full request/response shapes are in Swagger at `/api/docs` while the
+server is running, generated from the same interfaces the code
+actually uses (see `swagger-spec.ts` and `schemas.generated.ts` above).
+
+## CI
+
+`.github/workflows/code-checks.yml` runs on every push and pull
+request to `main` (also runnable by hand via `workflow_dispatch`).
+
+Three jobs: `frontend-build` (independent, runs in parallel, confirms
+`dist/index.html` exists after a real production build), `type-check`
+(regenerates `schemas.generated.ts`, then `npx tsc --noEmit` under
+`strict: true`), and `boot-test` (installs deps, regenerates schemas,
+compiles, boots the real compiled `dist/server.js`, checks the actual
+response body of `/api/health`, not just the status code, confirms
+`/api/docs` responds, and confirms `/api/verify` returns `400` on a
+request with no image).
+
+That last check only exercises the missing-`labelImage` validation
+path in `server.ts`, it does not send a real label through the OpenAI
+vision call in CI, so no `OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secret
+is needed for CI to pass. Real end-to-end verification against a live
+label does exist, but as local PowerShell tooling
+(`dev_scripts\debug_verify.ps1`, `benchmark_verify.ps1`,
+`test_batch_verify.ps1`, `test_batch_volume.ps1`), not as a CI job.
+Folding an equivalent check into `code-checks.yml` itself (gated on
+`OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secrets) is the natural next
+step, not yet done. Run the existing CI checks locally before pushing
+with `..\dev_scripts\test_code_checks_yml.bat` (via `act`).
+
+## Running
+
+**Development** (runs `.ts` source directly via `tsx`, no manual
+compile step, auto-restarts on changes):
 
 ```
 npm install
+cp .env.example .env
 npm run dev
 ```
 
-Or `..\dev_scripts\run_front.bat` on Windows. Requires the backend
-running first (`run_back.bat`), since this proxies
-`/mvps/label-verify/api/*` to `http://127.0.0.1:3002` (stripping the
-`/mvps/label-verify` prefix before forwarding, see `vite.config.js`),
-not a bare `/api/*`, matching the same path the production Apache
-rule uses so dev and prod behave identically.
+Or `..\dev_scripts\run_back.bat` on Windows, which checks for `.env`,
+frees port 3002 if something else is bound to it, and starts the dev
+server.
 
-Runs at `http://localhost:5174`.
-
-## Production build (local / CI only, not what runs on the VPS)
+**Production** (regenerates schemas, compiles, then runs the compiled
+output, same steps Docker runs):
 
 ```
+npm install
+npm run generate:schemas
 npm run build
+node dist/server.js
 ```
 
-Or `..\dev_scripts\build_front.bat` on Windows. Output goes to
-`dist/`. `vite.config.js` sets `base: '/mvps/label-verify/'` to match
-the actual deployed subpath, live at
-`https://leelinkoff.com/mvps/label-verify/`, alongside
-insight-engine-rag's `/mvps/rag/`.
+If your `package.json`'s `build` script doesn't already run
+`generate:schemas` as part of it, run them as two separate steps like
+above, otherwise `swagger-spec.ts` will fail to compile against a
+missing or stale `schemas.generated.ts`.
 
-**This exact command is not what runs on the actual VPS.** Both
-above (a plain `npm run build`) work here because your machine and
-GitHub's CI runner both have a working Node install. The VPS does
-not, its host Node environment is broken (see
-`ARCHITECTURE_AND_DEPLOYMENT.md` section 1.2). For a real deploy, the
-identical `npm install && npm run build` runs inside a throwaway
-Docker container instead, see that same document's section 2.1 and
-2.3 for the exact command. The build step is the same either way,
-only where it executes differs.
+Server starts at `http://127.0.0.1:3002`.
+
+## Docker
+
+**Why Docker at all, not just running `node dist/server.js` directly
+on the VPS:** the production VPS host has no working Node install,
+it's broken and missing required shared libraries (see
+`ARCHITECTURE_AND_DEPLOYMENT.md` section 1.2 for the specifics). This
+container isn't a deployment preference, it's the only way this
+backend can actually run on that host at all.
+
+```
+docker build -t ttb-label-verify-backend .
+docker run -d --name ttb-label-verify-backend --restart unless-stopped -p 127.0.0.1:3002:3002 --env-file .env ttb-label-verify-backend
+```
+
+Binds only to localhost (`127.0.0.1:3002:3002`), not all interfaces,
+an earlier version of this command used `-p 3002:3002`, which bound
+`0.0.0.0:3002` and left the backend reachable directly from the
+internet, bypassing Apache entirely. Fixed, confirmed in both this
+command and `deploy-to-vps.yml`'s equivalent step.
+
+Or `..\dev_scripts\build_back_local.bat` (compiles without Docker) or
+`..\dev_scripts\build_back_docker.bat` (builds the actual image) on
+Windows. The Dockerfile regenerates `schemas.generated.ts` from the
+service interfaces, then compiles TypeScript to `dist/` during the
+image build, then runs `node dist/server.js`, it never runs `.ts`
+source directly in the container. `.env` needs both `OPENAI_API_KEY`
+and `OPENAI_VISION_MODEL` for `--env-file .env` to actually work at
+runtime, neither is optional, see Environment variables below.
+
+## Environment variables
+
+`.env.example`:
+```
+PORT=3002
+OPENAI_API_KEY=
+OPENAI_VISION_MODEL=
+```
+
+Both `OPENAI_API_KEY` and `OPENAI_VISION_MODEL` are required, `/api/verify`
+and `/api/verify/batch` fail extraction without either one, no default
+model is hardcoded in source. GPT-5.6 (as of this writing) ships as
+three priced tiers with real speed differences, `gpt-5.6-sol`
+(flagship, slowest, $5/$30 per 1M tokens), `gpt-5.6-terra` (balanced,
+$2.50/$15), `gpt-5.6-luna` (fastest/cheapest, $1/$6). Confirm current
+model names/pricing against OpenAI's docs before setting this, model
+lineups change.
+
+## Known limitations
+
+- No persistence; nothing is stored between requests regardless.
+- No auth or rate limiting, consistent with the assumption in
+  `DESIGN_CONSIDERATIONS.md` that this is acceptable for a prototype
+  handling no sensitive data.
+- CORS is fully open, fine for a demo, would need restricting before
+  any real deployment.
+- Batch processing is strictly sequential, one item at a time, no
+  concurrency. Confirmed working at 50 real items (50/50 succeeded,
+  2.81s/item average); the full 200-300 volume mentioned in the
+  assessment interviews was not run, real OpenAI API cost on an
+  unpaid assessment, not a technical limitation, see
+  `REQUIREMENTS_MATCH.md` for the honest extrapolation from the real
+  50-item number.
+- This app depends on direct outbound access to `api.openai.com`.
+  If deployed inside a network with outbound restrictions (the
+  assessment interviews mention this happened to a prior vendor
+  pilot), this would need to be confirmed reachable first, or routed
+  through something like Azure OpenAI Service instead.

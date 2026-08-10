@@ -15,16 +15,33 @@ export const GOVERNMENT_WARNING_TEXT: string =
   "(2) Consumption of alcoholic beverages impairs your ability to drive a car or " +
   "operate machinery, and may cause health problems.";
 
-// Loose format check for alcohol content, e.g. "40%", "12.5 %", "40% ALC/VOL".
-// Deliberately permissive: this is a presence/format check per the design
-// note below, not a strict-value comparison.
-const ALCOHOL_CONTENT_FORMAT = /\d{1,2}(\.\d+)?\s*%/;
+// Extracts a percentage number from strings like "45% Alc./Vol. (90 Proof)",
+// "12.5 %", "40% ALC/VOL". Returns null if no percentage pattern is found,
+// callers treat that as a mismatch, not a silent pass, an unparseable
+// value is not the same thing as a confirmed-correct one.
+function extractPercentage(value: string): number | null {
+  const match = value.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
+  if (!match) return null;
+  return parseFloat(match[1]);
+}
+
+// Real values are never fully clean: OCR rounding, a label printed as
+// "45.0%" against an application entered as "45%", etc. 0.1 percentage
+// points is enough slack to absorb that without opening the door to a
+// genuinely different ABV (e.g. 45% vs 40%) passing as a rounding
+// difference.
+const ALCOHOL_CONTENT_TOLERANCE = 0.1;
 
 export interface ApplicationData {
   brandName?: string;
   classType?: string;
   alcoholContent?: string;
   netContents?: string;
+  producerName?: string;
+  producerAddress?: string;
+  // Only present on imports. If unset, this is a domestic product and
+  // countryOfOrigin is not checked at all, see matchLabelToApplication.
+  countryOfOrigin?: string;
   [key: string]: unknown;
 }
 
@@ -60,9 +77,10 @@ export function normalize(value: string | null | undefined): string {
  * under both the "normalize() then compare" group and the "presence +
  * format check only" group, which is contradictory. This implementation
  * treats netContents as normalize()-and-compare, grouped with brandName
- * and classType, since that was the more specific instruction. Flag if
- * that's not the intended behavior; alcoholContent is the only field
- * getting presence/format-only treatment here.
+ * and classType, since that was the more specific instruction.
+ * alcoholContent uses its own numeric comparison (see extractPercentage
+ * above), not normalize(), a percentage needs a real numeric match, not
+ * a text-normalized one.
  */
 export function matchLabelToApplication(
   extractedFields: ExtractedLabelFields,
@@ -92,20 +110,39 @@ export function matchLabelToApplication(
   compareNormalized("brandName", extractedFields.brandName, applicationData.brandName);
   compareNormalized("classType", extractedFields.classType, applicationData.classType);
   compareNormalized("netContents", extractedFields.netContents, applicationData.netContents);
+  compareNormalized("producerName", extractedFields.producerName, applicationData.producerName);
+  compareNormalized("producerAddress", extractedFields.producerAddress, applicationData.producerAddress);
 
-  // alcoholContent: presence + format check only, not an exact-value
-  // compare against applicationData.alcoholContent. ABV is printed with
-  // enough formatting variance (e.g. "12%" vs "12% ALC/VOL" vs "12.0%
-  // ALC./VOL.") that a strict equality check would produce a lot of
-  // false needsReview flags for content that's actually fine.
+  // countryOfOrigin is only required on imports (TTB requirements
+  // list it as "Country of origin for imports"). If the application
+  // doesn't declare one, this is a domestic product and the field is
+  // skipped entirely, not checked and not flagged, rather than
+  // comparing against an empty string and generating a false
+  // needsReview on every domestic label.
+  if (applicationData.countryOfOrigin) {
+    compareNormalized("countryOfOrigin", extractedFields.countryOfOrigin, applicationData.countryOfOrigin);
+  }
+
+  // alcoholContent: real numeric comparison, not a presence/format-only
+  // check. Both sides are parsed to a percentage number and compared
+  // with a small tolerance (ALCOHOL_CONTENT_TOLERANCE) to absorb
+  // formatting/rounding noise ("12%" vs "12% ALC/VOL" vs "12.0%
+  // ALC./VOL.") without letting a genuinely different ABV pass. Either
+  // side failing to parse is a mismatch, not a silent pass, an
+  // unparseable value is not a confirmed-correct one.
   const alcoholExtracted = extractedFields.alcoholContent || "";
   const alcoholApplied = applicationData.alcoholContent || "";
-  const alcoholFormatOk = ALCOHOL_CONTENT_FORMAT.test(alcoholExtracted);
+  const extractedPct = extractPercentage(alcoholExtracted);
+  const appliedPct = extractPercentage(alcoholApplied);
+  const alcoholMatch =
+    extractedPct !== null &&
+    appliedPct !== null &&
+    Math.abs(extractedPct - appliedPct) <= ALCOHOL_CONTENT_TOLERANCE;
   fields.alcoholContent = {
-    match: alcoholFormatOk,
+    match: alcoholMatch,
     extracted: alcoholExtracted,
     applied: alcoholApplied,
-    needsReview: !alcoholFormatOk
+    needsReview: !alcoholMatch
   };
 
   // warningStatement: exact match against GOVERNMENT_WARNING_TEXT, plus
