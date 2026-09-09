@@ -1,242 +1,343 @@
-# TTB Label Verification — Backend
+# TTB Label Verification — Frontend
 
-Node.js + Express API, written in TypeScript. Thin routing layer over
-a set of plain-function services, structured so any given service can
-become a Lambda handler later without touching the underlying logic.
+React + Vite frontend for the TTB Label Verification prototype.
 
-Written in TypeScript rather than plain JavaScript, unlike
-insight-engine-rag's own backend, which keeps parallel `.ts` files as
-a type-checking aid but still deploys the plain-JS originals. Here,
-TypeScript is the only source and the compiled output is what
-actually runs, both locally and in the deployed Docker container.
+The frontend provides single-label and batch verification workflows for comparing alcohol label images against submitted application data. It is intentionally kept separate from the verification business logic: the browser owns user input, workflow state, API communication, and result presentation, while extraction and matching remain authoritative in the backend.
+
+The frontend follows the same general separation used in [insight-engine-rag's frontend README](https://github.com/LeeLinkoff/insight-engine-rag/blob/main/frontend/README.md): backend communication is isolated from presentation components, and larger workflows are split into focused components rather than accumulated in `App.jsx`.
 
 ## Status
 
-`/api/health`, `/api/docs`, `/api/verify`, and `/api/verify/batch` are
-all implemented. `services/extraction.ts` calls an OpenAI vision model
-to extract label fields; `services/matching.ts` compares those fields
-against submitted application data. `/api/verify` returns `400` if no
-`labelImage` is provided, `502` if extraction or matching fails (e.g.
-vision API error, malformed model response), otherwise `200` with a
-`MatchResult`.
+Implemented.
 
-Confirmed against the real API, not just implemented: 20 single-verify
-runs and a 50-item real batch run all passed, average latency 2.65s
-(single) / 2.81s (batch, per item), see `REQUIREMENTS_MATCH.md` for
-the full numbers.
+The frontend currently supports:
+
+- Backend health/status checking.
+- Single-label image verification.
+- Batch verification of multiple label images.
+- Separate application data for each batch item.
+- Field-level comparison of extracted and submitted values.
+- Match, mismatch, and human-review presentation.
+- Per-item batch success/failure reporting.
+- Expandable technical details for errors and backend health.
+- Production builds through Vite.
+
+`App.jsx` checks backend health when the application loads and provides the top-level Single Label / Batch navigation.
+
+The verification workflows call the backend through `src/api/client.js`; extraction and matching are not implemented a second time in browser code.
 
 ## Structure
 
-```
-backend/
-├── server.ts
-├── swagger-spec.ts
-├── schemas.generated.ts        (generated at build time, gitignored)
-├── tsconfig.json
-├── Dockerfile
-├── .env.example
+```text
+frontend/
+├── index.html
 ├── package.json
 ├── package-lock.json
+├── vite.config.js
 ├── README.md
-├── services/
-│   ├── extraction.ts
-│   ├── matching.ts
-│   └── batch.ts
-└── scripts/
-    └── generate-openapi-schemas.ts
+└── src/
+    ├── api/
+    │   └── client.js
+    ├── components/
+    │   ├── ApplicationDataForm.jsx
+    │   ├── BatchResultsTable.jsx
+    │   ├── BatchVerifyPanel.jsx
+    │   ├── ErrorMessage.jsx
+    │   ├── ImageDropzone.jsx
+    │   ├── MatchResultCard.jsx
+    │   ├── SingleVerifyPanel.jsx
+    │   ├── StatusCard.jsx
+    │   └── Tabs.jsx
+    ├── App.jsx
+    ├── App.css
+    └── main.jsx
 ```
 
-`node_modules/` and `dist/` (build output) are omitted above, both
-gitignored and rebuilt from source, not part of the tracked structure.
+`node_modules/` and `dist/` are omitted above. Both are generated locally rather than being part of the source structure.
 
-| File | What it does |
-|---|---|
-| `server.ts` | Thin router only: parses requests, calls a service, shapes the response. No business logic lives here. |
-| `services/extraction.ts` | `extractLabelFields(imageBuffer, mimeType) -> fields`. Calls an OpenAI vision model (Chat Completions API, `image_url` content). `OPENAI_VISION_MODEL` is required, no hardcoded default, GPT-5.6 ships as three priced tiers (`sol`/`terra`/`luna`) and the bare alias silently routes to the slowest/most expensive one. The OpenAI call has a real 30-second timeout via `AbortController`, a stalled request fails clearly instead of hanging forever, added after a real incident where a missing timeout made a stalled batch item indistinguishable from a crashed server. `mimeType` is required (from Multer) to build a valid `data:` URL. Pure function, no Express dependency. |
-| `services/matching.ts` | `matchLabelToApplication(extracted, applicationData) -> per-field match result`. Holds the canonical Government Warning text (27 CFR 16.21/16.22) and `normalize()` for tolerant comparison. brandName, classType, netContents, producerName, producerAddress: normalize()-and-compare, a mismatch is flagged `needsReview`, not auto-rejected. countryOfOrigin: same, but only when the application declares one (imports only). alcoholContent: real numeric comparison with a 0.1-point tolerance, not presence-only, an earlier version would have let a genuinely wrong ABV pass. warningStatement: exact text match plus two independent formatting conditions per 27 CFR 16.22. Pure function, exports `ApplicationData`, `FieldMatchResult`, `MatchResult`. |
-| `services/batch.ts` | `verifyBatch(items) -> per-item results`. Orchestrates extraction + matching per item with per-item error isolation. Logs per-item start/success/failure with elapsed time to the console, added after a real batch request failed with zero server-side output, impossible to tell whether the backend had crashed, hung, or was working fine. |
-| `swagger-spec.ts` | OpenAPI 3.0 spec. `components.schemas` generated directly from the real TS interfaces (see `schemas.generated.ts`), so response shapes can't drift out of sync with the code. `paths` is hand-written, Express doesn't carry that metadata anywhere for a generator to read. |
-| `scripts/generate-openapi-schemas.ts` | Generates `schemas.generated.ts` from `ExtractedLabelFields`, `ApplicationData`, `FieldMatchResult`, `MatchResult`, `BatchResultItem` using `ts-json-schema-generator`, then fixes up a few JSON-Schema-to-OpenAPI-3.0 differences. Run via `npm run generate:schemas`, also runs automatically in the Docker build. `schemas.generated.ts` is a build artifact, not something to hand-edit. |
-| `tsconfig.json` | `strict: true`, `outDir dist`, compiles `server.ts` + `swagger-spec.ts` + `services/**/*.ts`. |
-| `Dockerfile` | `node:20-alpine`, port 3002. Full `npm install` (needs devDependencies to compile and run the schema generator), then `npm run generate:schemas && npx tsc`, then runs the compiled `dist/server.js`. |
+- **`main.jsx`** — Frontend entry point. Mounts the React application.
 
-## Dockerfile, image, container: what's actually a file
+- **`App.jsx`** — Top-level application composition. Owns backend health/status and the currently selected Single Label / Batch tab. Workflow-specific state is intentionally delegated to the corresponding panel rather than accumulating all state here.
 
-`Dockerfile` (this file, right here in this folder) is the only real,
-plain text file in this whole chain, everything downstream of it is a
-Docker-internal object, not something you'd browse to on disk:
+- **`api/client.js`** — Centralized backend communication. Health, single-verification, and batch-verification requests go through this module instead of placing networking logic throughout presentation components.
 
+- **`components/SingleVerifyPanel.jsx`** — Owns the complete single-label workflow: selected image, application data, submission state, returned result, and request errors.
+
+- **`components/BatchVerifyPanel.jsx`** — Owns the batch workflow. Each uploaded image is paired with its own application-data object, preserving the positional relationship expected by the batch API.
+
+- **`components/ApplicationDataForm.jsx`** — Controlled form for the application values against which extracted label fields are compared. Reused by both verification workflows.
+
+- **`components/ImageDropzone.jsx`** — Reusable image selector supporting both single and multiple file selection. The parent owns the actual file state; the component reports selection and removal events.
+
+- **`components/MatchResultCard.jsx`** — Presents the field-level verification result returned by the backend, including extracted and applied values and match/review status.
+
+- **`components/BatchResultsTable.jsx`** — Presents batch results in a compact table and allows an individual item to be expanded into its full match result or processing error.
+
+- **`components/StatusCard.jsx`** — Displays backend reachability without exposing raw diagnostic data by default. Technical details remain available on demand.
+
+- **`components/ErrorMessage.jsx`** — Reusable plain-language error presentation with expandable technical details.
+
+- **`components/Tabs.jsx`** — Minimal reusable tab control used to switch between the single and batch workflows.
+
+- **`App.css`** — Shared design tokens and application styles.
+
+- **`vite.config.js`** — Vite development/build configuration, including backend API proxying and the production base path.
+
+## Why state and API concerns are split out
+
+The original frontend skeleton placed the small amount of available state directly in `App.jsx`. That was appropriate while the only behavior was a backend health check.
+
+Once the upload and verification workflows were implemented, keeping all state in `App.jsx` would have made the top-level component responsible for unrelated details from both single and batch verification.
+
+Instead:
+
+```text
+App
+ |
+ +-- backend health/status
+ +-- active workflow
+ |
+ +-- SingleVerifyPanel
+ |      +-- image
+ |      +-- application data
+ |      +-- submission/result/error state
+ |
+ +-- BatchVerifyPanel
+        +-- image/application pairs
+        +-- submission/result/error state
 ```
-Dockerfile (real file)
-    |  read by `docker build`
-    v
-Docker image "ttb-label-verify-backend" (Docker's internal storage, not a file)
-    |  instantiated by `docker run`
-    v
-Docker container "ttb-label-verify-backend" (the actual running process)
+
+Networking is separated again through `api/client.js`.
+
+This keeps presentation components focused on UI behavior and prevents the frontend from duplicating the backend's extraction or regulatory matching logic.
+
+## Data flow
+
+### Backend health
+
+On application load, `App.jsx` calls the health function in `api/client.js`.
+
+The normal UI reports whether the backend is online or unreachable. The complete health response or underlying error is available through the Technical Details control rather than displayed by default.
+
+### Single-label verification
+
+The single-label flow is:
+
+```text
+ImageDropzone
+      |
+      v
+SingleVerifyPanel <---- ApplicationDataForm
+      |
+      | verifyLabel(image, applicationData)
+      v
+ api/client.js
+      |
+      v
+ Backend API
+      |
+      v
+MatchResultCard
 ```
 
-The image is a static, inert template, built once per `docker build`.
-The container is a live instance created *from* that image, and it's
-the container, not the image, that's actually running and listening
-on port 3002. They happen to share the same name string here by
-convention (`-t ttb-label-verify-backend` on build, `--name ttb-label-verify-backend`
-on run), but they're genuinely different Docker objects, list images
-with `docker images`, list running containers with `docker ps`.
+The user selects one label image and enters the corresponding application values. Selecting another image replaces the previous selection.
 
-On the VPS, this Dockerfile lives at
-`/opt/label-verify/backend/Dockerfile` after `deploy-to-vps.yml`
-syncs it there, unchanged and unconsumed, `docker build` just
-re-reads it fresh on every deploy.
+`SingleVerifyPanel` submits both through the API client and renders the returned `MatchResult`.
 
-## Why services are split out
+### Batch verification
 
-Each service function takes plain data in and returns plain data out,
-with no dependency on `req`/`res`. That's the part of this codebase
-most likely to move to AWS/Azure (Lambda, Step Functions) if this
-prototype informs a real procurement decision. Keeping business logic
-decoupled from Express now means that move is a thin wrapper around
-an existing function later, not a rewrite. TypeScript's interfaces
-(`ExtractedLabelFields`, `ApplicationData`, `MatchResult`, `BatchItem`)
-make that boundary explicit and checked at compile time, not just
-documented in a comment. See `DESIGN_CONSIDERATIONS.md` for the full
-reasoning.
+Batch mode maintains one application-data object per uploaded image:
 
-## Endpoints
+```text
+Image 0 <--> Application 0
+Image 1 <--> Application 1
+Image 2 <--> Application 2
+              ...
+```
 
-| Method | Path | Status |
-|---|---|---|
-| GET | `/api/health` | Live |
-| GET | `/api/docs` | Live (Swagger UI) |
-| POST | `/api/verify` | Live. `200` on success, `400` if `labelImage` missing, `502` on extraction/matching failure |
-| POST | `/api/verify/batch` | Live. `200` with per-item results (each item independently `ok`/failed), `502` on batch-level failure (e.g. malformed `applications` JSON) |
+The batch API associates `labelImages[]` and application records by position, so that ordering is preserved by the frontend.
 
-Full request/response shapes are in Swagger at `/api/docs` while the
-server is running, generated from the same interfaces the code
-actually uses (see `swagger-spec.ts` and `schemas.generated.ts` above).
+After submission, `BatchResultsTable` displays the returned per-item results. An individual row can be expanded to display either the complete `MatchResult` or the processing error for that label.
+
+A failure for one returned batch item can therefore be presented independently from successful items.
+
+## Application data
+
+The frontend collects:
+
+- Brand Name
+- Class / Type
+- Alcohol Content
+- Net Contents
+- Producer / Bottler Name
+- Producer / Bottler Address
+- Country of Origin, for imported products
+
+The backend may additionally return Government Warning verification information as part of the match result.
+
+These values are intentionally collected as application data rather than treated as verification rules in the frontend. The actual comparison behavior remains in the backend.
+
+## Result presentation
+
+`MatchResultCard` consumes the backend `MatchResult` shape and displays each returned field with:
+
+- the value extracted from the label,
+- the corresponding submitted application value, and
+- its match/review status.
+
+The overall presentation distinguishes among:
+
+- all fields matching,
+- a mismatch, and
+- a result requiring human review.
+
+The frontend does not independently determine regulatory compliance. It presents the backend result.
+
+This distinction is intentional for the prototype: verification rules have one authoritative implementation rather than separate browser and server versions that could drift apart.
+
+## Error handling
+
+User-facing errors are deliberately separated from technical diagnostic information.
+
+`ErrorMessage` displays a short plain-language failure message first. The underlying error can be expanded through a Details control when troubleshooting is necessary.
+
+`StatusCard` follows the same approach for backend health: the default display communicates online/unreachable state, while Technical Details exposes the complete health response or error.
+
+The frontend therefore retains useful diagnostic information without making raw API errors the normal user experience.
+
+## Why the theme is reused, not new
+
+Color tokens, card/button/input styling, and the light-only color scheme were reused from insight-engine-rag's `App.css` rather than designed from scratch.
+
+This was intentional. The prototype work was focused on the label-verification workflow, backend integration, AI extraction, matching behavior, and batch processing rather than spending assessment time creating another visual design system.
+
+See the top-level `README.md` section "Why reuse, not reinvent" for the broader reasoning.
 
 ## CI
 
-`.github/workflows/code-checks.yml` runs on every push and pull
-request to `main` (also runnable by hand via `workflow_dispatch`).
+The repository-level `.github/workflows/code-checks.yml` includes an independent frontend build job.
 
-Three jobs: `frontend-build` (independent, runs in parallel, confirms
-`dist/index.html` exists after a real production build), `type-check`
-(regenerates `schemas.generated.ts`, then `npx tsc --noEmit` under
-`strict: true`), and `boot-test` (installs deps, regenerates schemas,
-compiles, boots the real compiled `dist/server.js`, checks the actual
-response body of `/api/health`, not just the status code, confirms
-`/api/docs` responds, and confirms `/api/verify` returns `400` on a
-request with no image).
+The frontend CI check installs its dependencies, performs a real Vite production build, and confirms that the expected `dist/index.html` output exists.
 
-That last check only exercises the missing-`labelImage` validation
-path in `server.ts`, it does not send a real label through the OpenAI
-vision call in CI, so no `OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secret
-is needed for CI to pass. Real end-to-end verification against a live
-label does exist, but as local PowerShell tooling
-(`dev_scripts\debug_verify.ps1`, `benchmark_verify.ps1`,
-`test_batch_verify.ps1`, `test_batch_volume.ps1`), not as a CI job.
-Folding an equivalent check into `code-checks.yml` itself (gated on
-`OPENAI_API_KEY`/`OPENAI_VISION_MODEL` secrets) is the natural next
-step, not yet done. Run the existing CI checks locally before pushing
-with `..\dev_scripts\test_code_checks_yml.bat` (via `act`).
+This verifies that the frontend source can actually be bundled for production rather than only checking source syntax.
 
-## Running
+The frontend CI job runs independently from the backend type-check and boot-test jobs.
 
-**Development** (runs `.ts` source directly via `tsx`, no manual
-compile step, auto-restarts on changes):
+## Development
 
-```
+Install dependencies and start the Vite development server:
+
+```bash
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-Or `..\dev_scripts\run_back.bat` on Windows, which checks for `.env`,
-frees port 3002 if something else is bound to it, and starts the dev
-server.
+Or on Windows:
 
-**Production** (regenerates schemas, compiles, then runs the compiled
-output, same steps Docker runs):
-
+```text
+..\dev_scripts\run_front.bat
 ```
-npm install
-npm run generate:schemas
+
+The backend should be running first through `run_back.bat` because frontend `/api/*` requests are proxied to the backend according to `vite.config.js`.
+
+The development frontend runs at:
+
+```text
+http://localhost:5174
+```
+
+## Production build
+
+Build the frontend with:
+
+```bash
 npm run build
-node dist/server.js
 ```
 
-If your `package.json`'s `build` script doesn't already run
-`generate:schemas` as part of it, run them as two separate steps like
-above, otherwise `swagger-spec.ts` will fail to compile against a
-missing or stale `schemas.generated.ts`.
+Or on Windows:
 
-Server starts at `http://127.0.0.1:3002`.
-
-## Docker
-
-**Why Docker at all, not just running `node dist/server.js` directly
-on the VPS:** the production VPS host has no working Node install,
-it's broken and missing required shared libraries (see
-`ARCHITECTURE_AND_DEPLOYMENT.md` section 1.2 for the specifics). This
-container isn't a deployment preference, it's the only way this
-backend can actually run on that host at all.
-
-```
-docker build -t ttb-label-verify-backend .
-docker run -d --name ttb-label-verify-backend --restart unless-stopped -p 127.0.0.1:3002:3002 --env-file .env ttb-label-verify-backend
+```text
+..\dev_scripts\build_front.bat
 ```
 
-Binds only to localhost (`127.0.0.1:3002:3002`), not all interfaces,
-an earlier version of this command used `-p 3002:3002`, which bound
-`0.0.0.0:3002` and left the backend reachable directly from the
-internet, bypassing Apache entirely. Fixed, confirmed in both this
-command and `deploy-to-vps.yml`'s equivalent step.
+Vite writes the generated static application to:
 
-Or `..\dev_scripts\build_back_local.bat` (compiles without Docker) or
-`..\dev_scripts\build_back_docker.bat` (builds the actual image) on
-Windows. The Dockerfile regenerates `schemas.generated.ts` from the
-service interfaces, then compiles TypeScript to `dist/` during the
-image build, then runs `node dist/server.js`, it never runs `.ts`
-source directly in the container. `.env` needs both `OPENAI_API_KEY`
-and `OPENAI_VISION_MODEL` for `--env-file .env` to actually work at
-runtime, neither is optional, see Environment variables below.
-
-## Environment variables
-
-`.env.example`:
-```
-PORT=3002
-OPENAI_API_KEY=
-OPENAI_VISION_MODEL=
+```text
+dist/
 ```
 
-Both `OPENAI_API_KEY` and `OPENAI_VISION_MODEL` are required, `/api/verify`
-and `/api/verify/batch` fail extraction without either one, no default
-model is hardcoded in source. GPT-5.6 (as of this writing) ships as
-three priced tiers with real speed differences, `gpt-5.6-sol`
-(flagship, slowest, $5/$30 per 1M tokens), `gpt-5.6-terra` (balanced,
-$2.50/$15), `gpt-5.6-luna` (fastest/cheapest, $1/$6). Confirm current
-model names/pricing against OpenAI's docs before setting this, model
-lineups change.
+The production build is static frontend content; it does not contain or run the Node/Express backend.
+
+`vite.config.js` sets:
+
+```text
+base: '/mvps/label-verify/'
+```
+
+to match the intended deployment subpath alongside insight-engine-rag's `/mvps/rag/`.
+
+## Backend integration
+
+During development, Vite proxies `/api/*` requests to the backend at:
+
+```text
+http://127.0.0.1:3002
+```
+
+The frontend therefore uses relative `/api/...` paths rather than embedding a separate backend host throughout the component code.
+
+The backend provides the actual health, verification, and batch-verification endpoints. Full backend endpoint and request/response documentation is maintained separately in:
+
+```text
+../backend/README.md
+```
+
+and in the running Swagger UI at `/api/docs`.
+
+## Deployment
+
+Unlike the backend, the frontend does not require a long-running Node process in production.
+
+`npm run build` produces the static files under `dist/`. Those files are the deployable frontend artifact and can be served by the web server under the configured `/mvps/label-verify/` base path.
+
+The frontend communicates with the separately deployed backend through `/api/*`.
+
+This keeps the production responsibilities separate:
+
+```text
+Browser
+   |
+   v
+Static React/Vite build
+   |
+   | /api/*
+   v
+Backend API
+   |
+   v
+Extraction / matching services
+```
+
+## Environment/configuration
+
+The frontend does not contain the OpenAI API key or model configuration.
+
+Those values belong exclusively to the backend.
+
+Frontend runtime behavior is primarily controlled through `vite.config.js`, including:
+
+- the development API proxy,
+- development server behavior, and
+- the production base path.
+
+Keeping model credentials out of the browser is required because frontend JavaScript and its bundled configuration are delivered to the user and cannot safely contain secrets.
 
 ## Known limitations
 
-- No persistence; nothing is stored between requests regardless.
-- No auth or rate limiting, consistent with the assumption in
-  `DESIGN_CONSIDERATIONS.md` that this is acceptable for a prototype
-  handling no sensitive data.
-- CORS is fully open, fine for a demo, would need restricting before
-  any real deployment.
-- Batch processing is strictly sequential, one item at a time, no
-  concurrency. Confirmed working at 50 real items (50/50 succeeded,
-  2.81s/item average); the full 200-300 volume mentioned in the
-  assessment interviews was not run, real OpenAI API cost on an
-  unpaid assessment, not a technical limitation, see
-  `REQUIREMENTS_MATCH.md` for the honest extrapolation from the real
-  50-item number.
-- This app depends on direct outbound access to `api.openai.com`.
-  If deployed inside a network with outbound restrictions (the
-  assessment interviews mention this happened to a prior vendor
-  pilot), this would need to be confirmed reachable first, or routed
-  through something like Azure OpenAI Service instead.
+- No frontend authentication or authorization; consistent with the prototype scope.
+- Application state is transient and is lost on page refresh.
+- Uploaded images and verification results are not persisted by the frontend.
+- Batch application data is entered separately for each selected image; there is no CSV/import workflow.
+- Batch requests are submitted as one workflow; backend processing behavior and scalability are documented in the backend README.
+- The frontend relies on the backend for all extraction and matching decisions and cannot perform verification independently if the API is unavailable.
+- The UI is prototype-oriented rather than a production accessibility/usability certification effort.
